@@ -1,0 +1,27 @@
+{
+  "version": 8,
+  "name": "Alpha terrain spike: Esri imagery + AWS Terrarium DEM (same encoding and grid as dtm_israel)",
+  "sources": {
+    "ortho": {
+      "type": "raster",
+      "tiles": ["https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"],
+      "tileSize": 256,
+      "maxzoom": 18,
+      "attribution": "Esri World Imagery"
+    },
+    "dem": {
+      "type": "raster-dem",
+      "tiles": ["https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png"],
+      "tileSize": 256,
+      "encoding": "terrarium",
+      "maxzoom": 15,
+      "attribution": "AWS Terrain Tiles"
+    }
+  },
+  "terrain": { "source": "dem", "exaggeration": 1.0 },
+  "layers": [
+    { "id": "background", "type": "background", "paint": { "background-color": "#1a1f2a" } },
+    { "id": "ortho", "type": "raster", "source": "ortho" },
+    { "id": "hillshade", "type": "hillshade", "source": "dem", "paint": { "hillshade-exaggeration": 0.35 } }
+  ]
+}
