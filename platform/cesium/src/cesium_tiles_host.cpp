@@ -43,6 +43,10 @@
 
 #include <glm/glm.hpp>
 #include <glm/gtc/constants.hpp>
+#include <spdlog/spdlog.h>
+#if defined(__ANDROID__)
+#include <spdlog/sinks/android_sink.h>
+#endif
 
 #include <array>
 #include <chrono>
@@ -499,6 +503,12 @@ public:
             resources,
             *asyncSystem,
             std::make_shared<CesiumUtility::CreditSystem>()};
+#if defined(__ANDROID__)
+        // cesium-native's own messages (failed requests, bad content) reach logcat instead of a
+        // stdout nobody reads.
+        static std::shared_ptr<spdlog::logger> androidLogger = spdlog::android_logger_mt("cesium-native", "CesiumNative");
+        externals.pLogger = androidLogger;
+#endif
         Cesium3DTilesSelection::TilesetOptions options;
         options.maximumScreenSpaceError = maximumScreenSpaceError;
         options.maximumCachedBytes = 256LL * 1024 * 1024;
