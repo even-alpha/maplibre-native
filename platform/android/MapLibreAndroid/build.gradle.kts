@@ -61,7 +61,8 @@ android {
 
     defaultConfig {
         compileSdk = 34
-        minSdk = 23
+        // -Pmaplibre.minSdk=28 when linking cesium-native built for a newer API level.
+        minSdk = (project.findProperty("maplibre.minSdk") as String?)?.toInt() ?: 23
         buildConfigField("String", "GIT_REVISION_SHORT", "\"${getGitRevision()}\"")
         buildConfigField("String", "GIT_REVISION", "\"${getGitRevision(false)}\"")
         buildConfigField(

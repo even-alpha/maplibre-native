@@ -18,7 +18,11 @@ namespace cesium {
 /// buffers and draws the tiles selected for the frame.
 class CesiumTilesHost final : public style::CustomLayerHost {
 public:
-    explicit CesiumTilesHost(std::string tilesetUrl, double maximumScreenSpaceError = 16.0);
+    /// `heightOffsetMeters` is added to every vertex's height, for data whose vertical datum
+    /// is off; the camera cesium-native culls with moves the other way, so the two agree.
+    explicit CesiumTilesHost(std::string tilesetUrl,
+                             double maximumScreenSpaceError = 16.0,
+                             double heightOffsetMeters = 0.0);
     ~CesiumTilesHost() override;
 
     bool rendersIn3D() const override { return true; }

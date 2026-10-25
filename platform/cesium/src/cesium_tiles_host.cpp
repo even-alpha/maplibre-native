@@ -427,13 +427,16 @@ GLuint compileShader(GLenum type, const char* source) {
 
 class CesiumTilesHost::Impl {
 public:
-    Impl(std::string url_, double sse) : url(std::move(url_)), maximumScreenSpaceError(sse) {}
+    Impl(std::string url_, double sse, double heightOffset_)
+        : url(std::move(url_)),
+          maximumScreenSpaceError(sse),
+          heightOffset(heightOffset_) {}
 
     std::string url;
     double maximumScreenSpaceError;
     // Metres added to every vertex's height. cesium-native culls and picks detail in the
     // data's own frame, so the camera it sees is moved the other way (viewFor).
-    double heightOffset = 0.0;
+    double heightOffset;
 
     std::shared_ptr<RendererResources> resources;
     std::unique_ptr<Cesium3DTilesSelection::Tileset> tileset;
@@ -484,8 +487,15 @@ public:
         resources = std::make_shared<RendererResources>();
         resources->heightOffset = heightOffset;
         asyncSystem.emplace(std::make_shared<ThreadTaskProcessor>());
+        CesiumCurl::CurlAssetAccessorOptions accessorOptions;
+        accessorOptions.userAgent = "MapLibre Native Cesium tiles";
+#if defined(__ANDROID__)
+        // curl built with OpenSSL has no CA bundle of its own on Android; the system store
+        // is a directory of hashed PEM files, which is what CAPATH wants.
+        accessorOptions.certificatePath = "/system/etc/security/cacerts";
+#endif
         Cesium3DTilesSelection::TilesetExternals externals{
-            std::make_shared<CesiumCurl::CurlAssetAccessor>(),
+            std::make_shared<CesiumCurl::CurlAssetAccessor>(accessorOptions),
             resources,
             *asyncSystem,
             std::make_shared<CesiumUtility::CreditSystem>()};
@@ -640,8 +650,8 @@ public:
     }
 };
 
-CesiumTilesHost::CesiumTilesHost(std::string tilesetUrl, double maximumScreenSpaceError)
-    : impl(std::make_unique<Impl>(std::move(tilesetUrl), maximumScreenSpaceError)) {}
+CesiumTilesHost::CesiumTilesHost(std::string tilesetUrl, double maximumScreenSpaceError, double heightOffsetMeters)
+    : impl(std::make_unique<Impl>(std::move(tilesetUrl), maximumScreenSpaceError, heightOffsetMeters)) {}
 
 CesiumTilesHost::~CesiumTilesHost() = default;
 

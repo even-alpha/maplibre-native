@@ -68,6 +68,20 @@ fun Project.nativeBuild(nativeTargets: List<String>) =
                                         "-DANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=ON"
                                     )
                                 )
+                                // The Cesium 3D Tiles layer (platform/cesium): on when a built
+                                // cesium-native is named, e.g. -PmlnCesiumNativePrefix=.../install-android
+                                // -PmlnCesiumVcpkgDir=.../installed/arm64-android [-PmlnCesiumNativeSourceDir=...]
+                                project.findProperty("mlnCesiumNativePrefix")?.let { prefix ->
+                                    arguments.addAll(
+                                        listOf("-DMLN_WITH_CESIUM_TILES=ON", "-DMLN_CESIUM_NATIVE_PREFIX=$prefix")
+                                    )
+                                    project.findProperty("mlnCesiumVcpkgDir")?.let {
+                                        arguments.add("-DMLN_CESIUM_VCPKG_DIR=$it")
+                                    }
+                                    project.findProperty("mlnCesiumNativeSourceDir")?.let {
+                                        arguments.add("-DMLN_CESIUM_NATIVE_SOURCE_DIR=$it")
+                                    }
+                                }
 
                                 cFlags.add("-Qunused-arguments")
                                 cppFlags.add("-Qunused-arguments")
@@ -118,6 +132,20 @@ fun Project.nativeBuild(nativeTargets: List<String>) =
                                         "-DANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=ON"
                                     )
                                 )
+                                // The Cesium 3D Tiles layer (platform/cesium): on when a built
+                                // cesium-native is named, e.g. -PmlnCesiumNativePrefix=.../install-android
+                                // -PmlnCesiumVcpkgDir=.../installed/arm64-android [-PmlnCesiumNativeSourceDir=...]
+                                project.findProperty("mlnCesiumNativePrefix")?.let { prefix ->
+                                    arguments.addAll(
+                                        listOf("-DMLN_WITH_CESIUM_TILES=ON", "-DMLN_CESIUM_NATIVE_PREFIX=$prefix")
+                                    )
+                                    project.findProperty("mlnCesiumVcpkgDir")?.let {
+                                        arguments.add("-DMLN_CESIUM_VCPKG_DIR=$it")
+                                    }
+                                    project.findProperty("mlnCesiumNativeSourceDir")?.let {
+                                        arguments.add("-DMLN_CESIUM_NATIVE_SOURCE_DIR=$it")
+                                    }
+                                }
 
                                 cFlags.add("-Qunused-arguments")
                                 cppFlags.add("-Qunused-arguments")

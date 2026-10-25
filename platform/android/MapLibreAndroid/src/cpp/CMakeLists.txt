@@ -269,6 +269,10 @@ if(MLN_WITH_PLUGINS)
     # An exported name alone does not pull an unreferenced function out of mbgl-core.
     target_link_options(maplibre PRIVATE "-Wl,--undefined=mln_plugin_register_v1")
 endif()
+if(MLN_WITH_CESIUM_TILES)
+    # The Cesium layer's JNI factory is a plain exported symbol, not registered in JNI_OnLoad.
+    string(APPEND MLN_PLUGIN_EXPORTS "\n    Java_org_maplibre_android_cesium_CesiumTilesLayer_nativeCreateHost;")
+endif()
 set(_version_script "${CMAKE_CURRENT_BINARY_DIR}/maplibre-version-script")
 configure_file("${CMAKE_CURRENT_SOURCE_DIR}/../../../version-script.in" "${_version_script}" @ONLY)
 set_property(TARGET maplibre APPEND PROPERTY LINK_DEPENDS "${_version_script}")
@@ -287,3 +291,13 @@ target_link_libraries(maplibre
                               mbgl-vendor-unique_resource)
 
 install(TARGETS maplibre LIBRARY DESTINATION lib)
+
+# The Cesium 3D Tiles layer (platform/cesium) and its JNI factory, when built with
+# -DMLN_WITH_CESIUM_TILES=ON (see the mlnCesium* Gradle properties).
+if(MLN_WITH_CESIUM_TILES)
+    if(NOT TARGET mbgl-cesium-tiles)
+        add_subdirectory(../../../../cesium ${CMAKE_CURRENT_BINARY_DIR}/cesium)
+    endif()
+    target_sources(maplibre PRIVATE ${PROJECT_SOURCE_DIR}/../../../src/cesium_tiles_layer_jni.cpp)
+    target_link_libraries(maplibre PRIVATE mbgl-cesium-tiles)
+endif()
