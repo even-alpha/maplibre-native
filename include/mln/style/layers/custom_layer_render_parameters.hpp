@@ -16,12 +16,22 @@ namespace style {
 struct CustomLayerRenderParameters {
     double width;
     double height;
+    /// Device pixels per logical pixel; `width` and `height` are logical.
+    double pixelRatio;
     double latitude;
     double longitude;
     double zoom;
     double bearing;
     double pitch;
     double fieldOfView;
+    /// Metres above sea level of the point the camera orbits (the ground under the map
+    /// centre when the centre is clamped to terrain, else 0).
+    double centerAltitude;
+    /// Whether 3D terrain is drawn this frame, and the factor its heights are scaled by.
+    /// A 3D host draws metres above sea level when terrain is on; off terrain the map is a
+    /// flat plane at sea level.
+    bool terrainEnabled;
+    double terrainExaggeration;
 
     /// Standard projection matrix (nearZ = 1 tile unit).
     /// Use this for 2D/flat custom geometry.

@@ -1,5 +1,6 @@
 #include <mln/cesium/cesium_tiles_host.hpp>
 
+#include <mln/cesium/file_source_asset_accessor.hpp>
 #include <mln/style/layers/custom_layer_render_parameters.hpp>
 #include <mln/util/logging.hpp>
 
@@ -15,6 +16,7 @@
 #define MLN_CESIUM_GLSL_PRELUDE "#version 300 es\nprecision highp float;\nprecision highp int;\n"
 #endif
 
+#include <Cesium3DTilesSelection/BoundingVolume.h>
 #include <Cesium3DTilesSelection/IPrepareRendererResources.h>
 #include <Cesium3DTilesSelection/Tile.h>
 #include <Cesium3DTilesSelection/TileContent.h>
@@ -27,7 +29,7 @@
 #include <Cesium3DTilesContent/registerAllTileContentTypes.h>
 #include <CesiumAsync/AsyncSystem.h>
 #include <CesiumAsync/ITaskProcessor.h>
-#include <CesiumCurl/CurlAssetAccessor.h>
+#include <CesiumGeospatial/BoundingRegion.h>
 #include <CesiumGeospatial/Cartographic.h>
 #include <CesiumGeospatial/Ellipsoid.h>
 #include <CesiumGeospatial/GlobeTransforms.h>
@@ -52,6 +54,8 @@
 #include <chrono>
 #include <cmath>
 #include <map>
+#include <mutex>
+#include <set>
 #include <thread>
 #include <variant>
 #include <vector>
@@ -389,12 +393,14 @@ public:
 constexpr const char* vertexSource = MLN_CESIUM_GLSL_PRELUDE
     "uniform mat4 u_matrix;\n"
     "uniform float u_scale;\n"
+    "uniform float u_z_scale;\n"
+    "uniform float u_z_offset;\n"
     "layout (location = 0) in vec3 a_pos;\n"
     "layout (location = 1) in vec2 a_uv;\n"
     "out vec2 v_uv;\n"
     "void main() {\n"
     "    v_uv = a_uv;\n"
-    "    gl_Position = u_matrix * vec4(a_pos.xy * u_scale, a_pos.z, 1.0);\n"
+    "    gl_Position = u_matrix * vec4(a_pos.xy * u_scale, a_pos.z * u_z_scale + u_z_offset, 1.0);\n"
     "}\n";
 
 constexpr const char* fragmentSource = MLN_CESIUM_GLSL_PRELUDE
@@ -449,6 +455,8 @@ public:
     GLuint program = 0;
     GLint uMatrix = -1;
     GLint uScale = -1;
+    GLint uZScale = -1;
+    GLint uZOffset = -1;
     GLint uTexture = -1;
     GLint uTextured = -1;
     GLint uColor = -1;
@@ -457,6 +465,10 @@ public:
     uint64_t frame = 0;
     size_t tilesRenderedLastFrame = 0;
     size_t tilesLoggedLastTime = 0;
+    size_t tilesQueuedLastFrame = 0;
+    // The tileset's lowest point (drawn height), for the flat map.
+    double flatBase = 0.0;
+    bool flatBaseKnown = false;
 
     void createProgram() {
         const GLuint vs = compileShader(GL_VERTEX_SHADER, vertexSource);
@@ -478,6 +490,8 @@ public:
         }
         uMatrix = glGetUniformLocation(program, "u_matrix");
         uScale = glGetUniformLocation(program, "u_scale");
+        uZScale = glGetUniformLocation(program, "u_z_scale");
+        uZOffset = glGetUniformLocation(program, "u_z_offset");
         uTexture = glGetUniformLocation(program, "u_texture");
         uTextured = glGetUniformLocation(program, "u_textured");
         uColor = glGetUniformLocation(program, "u_color");
@@ -491,18 +505,10 @@ public:
         resources = std::make_shared<RendererResources>();
         resources->heightOffset = heightOffset;
         asyncSystem.emplace(std::make_shared<ThreadTaskProcessor>());
-        CesiumCurl::CurlAssetAccessorOptions accessorOptions;
-        accessorOptions.userAgent = "MapLibre Native Cesium tiles";
-#if defined(__ANDROID__)
-        // curl built with OpenSSL has no CA bundle of its own on Android; the system store
-        // is a directory of hashed PEM files, which is what CAPATH wants.
-        accessorOptions.certificatePath = "/system/etc/security/cacerts";
-#endif
-        Cesium3DTilesSelection::TilesetExternals externals{
-            std::make_shared<CesiumCurl::CurlAssetAccessor>(accessorOptions),
-            resources,
-            *asyncSystem,
-            std::make_shared<CesiumUtility::CreditSystem>()};
+        Cesium3DTilesSelection::TilesetExternals externals{std::make_shared<FileSourceAssetAccessor>(),
+                                                           resources,
+                                                           *asyncSystem,
+                                                           std::make_shared<CesiumUtility::CreditSystem>()};
 #if defined(__ANDROID__)
         // cesium-native's own messages (failed requests, bad content) reach logcat instead of a
         // stdout nobody reads.
@@ -531,8 +537,14 @@ public:
         const double up = distancePx * std::cos(pitch) * metresPerPixel;
         const double back = distancePx * std::sin(pitch) * metresPerPixel;
 
-        // East-north-up around the map centre: the camera sits behind the centre, opposite
-        // the bearing, and looks at it.
+        // East-north-up around the point the camera orbits: the map centre at its altitude
+        // (the ground under it when the centre is clamped to terrain). The camera sits
+        // behind it, opposite the bearing, and looks at it. Drawn heights are metres above
+        // sea level on terrain and relative to the flat plane otherwise, so in the data's
+        // frame the orbit point is that much higher or lower.
+        const double orbitAltitude = (p.terrainEnabled ? p.centerAltitude / p.terrainExaggeration
+                                                       : p.centerAltitude + flatBase) -
+                                     heightOffset;
         const glm::dvec3 cameraEnu{-std::sin(bearing) * back, -std::cos(bearing) * back, up};
         const glm::dvec3 direction = glm::normalize(-cameraEnu);
         glm::dvec3 cameraUp;
@@ -544,16 +556,22 @@ public:
         }
 
         const auto& ellipsoid = CesiumGeospatial::Ellipsoid::WGS84;
-        const glm::dvec3 centreEcef = ellipsoid.cartographicToCartesian(CesiumGeospatial::Cartographic(lon, lat, 0.0));
+        const glm::dvec3 centreEcef =
+            ellipsoid.cartographicToCartesian(CesiumGeospatial::Cartographic(lon, lat, orbitAltitude));
         const glm::dmat4 enuToEcef = CesiumGeospatial::GlobeTransforms::eastNorthUpToFixedFrame(centreEcef, ellipsoid);
         const glm::dmat3 rotate(enuToEcef);
-        // In the data's frame the ground is `heightOffset` lower than drawn, so the camera is
-        // that much higher above it.
-        const glm::dvec3 position = glm::dvec3(enuToEcef * glm::dvec4(cameraEnu - glm::dvec3{0.0, 0.0, heightOffset}, 1.0));
+        const glm::dvec3 position = glm::dvec3(enuToEcef * glm::dvec4(cameraEnu, 1.0));
 
         const double hfov = 2.0 * std::atan(std::tan(fov / 2.0) * p.width / p.height);
-        return Cesium3DTilesSelection::ViewState(
-            position, rotate * direction, rotate * cameraUp, glm::dvec2(p.width, p.height), hfov, fov, ellipsoid);
+        // Screen-space error is judged in device pixels; the map's size is logical.
+        const double ratio = p.pixelRatio > 0.0 ? p.pixelRatio : 1.0;
+        return Cesium3DTilesSelection::ViewState(position,
+                                                 rotate * direction,
+                                                 rotate * cameraUp,
+                                                 glm::dvec2(p.width * ratio, p.height * ratio),
+                                                 hfov,
+                                                 fov,
+                                                 ellipsoid);
     }
 
     void render(const style::CustomLayerRenderParameters& p) {
@@ -565,10 +583,19 @@ public:
         lastFrame = now;
 
         asyncSystem->dispatchMainThreadTasks();
+        if (!flatBaseKnown) {
+            if (const auto* root = tileset->getRootTile()) {
+                // Off terrain the map is a flat plane: the tileset's lowest point lands on it.
+                const auto region = Cesium3DTilesSelection::getBoundingRegionFromBoundingVolume(root->getBoundingVolume());
+                flatBase = region ? region->getMinimumHeight() + heightOffset : 0.0;
+                flatBaseKnown = true;
+            }
+        }
         const auto view = viewFor(p);
         const auto& result = tileset->updateViewGroup(tileset->getDefaultViewGroup(), {view}, dt);
         tileset->loadTiles();
         tilesRenderedLastFrame = result.tilesToRenderThisFrame.size();
+        tilesQueuedLastFrame = static_cast<size_t>(result.workerThreadTileLoadQueueLength + result.mainThreadTileLoadQueueLength);
 
         if (++frame % 120 == 1 || result.tilesToRenderThisFrame.size() != tilesLoggedLastTime) {
             tilesLoggedLastTime = result.tilesToRenderThisFrame.size();
@@ -619,6 +646,10 @@ public:
         glActiveTexture(GL_TEXTURE0);
         glUniform1i(uTexture, 0);
         glUniform1f(uScale, static_cast<float>(worldSize / offsetScale));
+        // On terrain, heights are drawn like the terrain's own: metres times its exaggeration.
+        // Off terrain the plane is at sea level, so the tileset comes down to its base.
+        glUniform1f(uZScale, p.terrainEnabled ? static_cast<float>(p.terrainExaggeration) : 1.0f);
+        glUniform1f(uZOffset, p.terrainEnabled ? 0.0f : static_cast<float>(-flatBase));
 
         for (const auto& tile : result.tilesToRenderThisFrame) {
             const auto* content = tile->getContent().getRenderContent();
@@ -660,10 +691,34 @@ public:
     }
 };
 
-CesiumTilesHost::CesiumTilesHost(std::string tilesetUrl, double maximumScreenSpaceError, double heightOffsetMeters)
-    : impl(std::make_unique<Impl>(std::move(tilesetUrl), maximumScreenSpaceError, heightOffsetMeters)) {}
+namespace {
+// The hosts alive right now, so a handle held outside (the Android layer's pointer) can be
+// checked before use: the style owns the host and may have deleted it.
+std::mutex liveHostsMutex;
+std::set<const CesiumTilesHost*> liveHosts;
+} // namespace
 
-CesiumTilesHost::~CesiumTilesHost() = default;
+CesiumTilesHost::CesiumTilesHost(std::string tilesetUrl, double maximumScreenSpaceError, double heightOffsetMeters)
+    : impl(std::make_unique<Impl>(std::move(tilesetUrl), maximumScreenSpaceError, heightOffsetMeters)) {
+    std::lock_guard<std::mutex> lock(liveHostsMutex);
+    liveHosts.insert(this);
+}
+
+CesiumTilesHost::~CesiumTilesHost() {
+    std::lock_guard<std::mutex> lock(liveHostsMutex);
+    liveHosts.erase(this);
+}
+
+bool CesiumTilesHost::isAlive(const CesiumTilesHost* host) {
+    std::lock_guard<std::mutex> lock(liveHostsMutex);
+    return liveHosts.count(host) > 0;
+}
+
+bool CesiumTilesHost::isLoading() {
+    if (!impl->tileset) return true;
+    if (!impl->tileset->getRootTile()) return true;
+    return impl->tilesQueuedLastFrame > 0 || impl->tileset->computeLoadProgress() < 100.0f;
+}
 
 void CesiumTilesHost::initialize(const style::CustomLayerInitParameters&) {
     impl->createProgram();

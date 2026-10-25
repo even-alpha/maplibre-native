@@ -1,5 +1,6 @@
 #include <mln/style/layers/custom_layer_render_parameters.hpp>
 #include <mln/renderer/paint_parameters.hpp>
+#include <mln/renderer/render_terrain.hpp>
 #include <mln/util/mat4.hpp>
 
 namespace mln {
@@ -9,12 +10,16 @@ CustomLayerRenderParameters::CustomLayerRenderParameters(const mln::PaintParamet
     const TransformState& state = paintParameters.state;
     width = state.getSize().width;
     height = state.getSize().height;
+    pixelRatio = paintParameters.pixelRatio;
     latitude = state.getLatLng().latitude();
     longitude = state.getLatLng().longitude();
     zoom = state.getZoom();
     bearing = util::rad2deg(-state.getBearing());
     pitch = state.getPitch();
     fieldOfView = state.getFieldOfView();
+    centerAltitude = state.getCenterAltitude();
+    terrainEnabled = paintParameters.terrain && paintParameters.terrain->isEnabled();
+    terrainExaggeration = terrainEnabled ? paintParameters.terrain->getExaggeration() : 1.0;
     mat4 projMatrix;
     state.getProjMatrix(projMatrix);
     projectionMatrix = projMatrix;

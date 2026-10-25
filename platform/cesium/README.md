@@ -9,6 +9,15 @@ OpenGL ES 3 inside MapLibre's projection, so it sits on the 3D terrain and is oc
 - `CustomLayerHost::rendersIn3D()`: custom layers are normally drawn into the terrain drape;
   a 3D host draws in the main pass with the 3D depth mode instead (the core change in
   `render_custom_layer.cpp` and `drawable_custom_layer_host_tweaker.cpp`).
+- `include/mln/cesium/file_source_asset_accessor.hpp`: tileset and tile requests go through the
+  map's own network `FileSource`, so they share its HTTP client (OkHttp on Android, with the
+  app's TLS, proxy and auth interceptors), its retries for timeouts and 5xx answers, and its
+  cache. A tileset therefore loads from wherever the map's tiles can.
+- `CustomLayerRenderParameters` carries `pixelRatio`, `centerAltitude`, `terrainEnabled` and
+  `terrainExaggeration`: the host orbits the same point as MapLibre's camera, measures screen
+  space error in device pixels, and on a flat map sets the tileset's base on the ground plane.
+- Tiles load only while frames are drawn. `CesiumTilesHost::isLoading()` (Android:
+  `CesiumTilesLayer.isLoading`) tells the app to keep repainting until the view is refined.
 - `MLN_CESIUM_HEIGHT_OFFSET=<metres>`: lifts or lowers a tileset whose vertical datum is off.
   Cesium's public AGI HQ sample sits at about −187 m against AWS Terrarium terrain.
 - `MLN_CESIUM_NO_DEPTH=1`, `MLN_CESIUM_NO_CULL=1`: diagnostics.

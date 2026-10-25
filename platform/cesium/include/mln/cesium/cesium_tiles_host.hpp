@@ -36,6 +36,13 @@ public:
     /// drawing frames until the tiles it shows are in.
     float loadProgress();
 
+    /// Whether tiles for the last view are still on their way. Loading advances only while
+    /// frames are drawn, so a map that renders on demand keeps repainting while this is true.
+    bool isLoading();
+
+    /// Whether `host` is a host that still exists; the style owns hosts and deletes them.
+    static bool isAlive(const CesiumTilesHost* host);
+
 private:
     class Impl;
     std::unique_ptr<Impl> impl;

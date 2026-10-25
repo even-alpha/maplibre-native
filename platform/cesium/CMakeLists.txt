@@ -29,6 +29,7 @@ find_package(cesium-native CONFIG REQUIRED)
 add_library(
     mbgl-cesium-tiles STATIC
     ${CMAKE_CURRENT_SOURCE_DIR}/src/cesium_tiles_host.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/file_source_asset_accessor.cpp
 )
 
 target_include_directories(

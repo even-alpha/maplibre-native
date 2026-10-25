@@ -15,3 +15,10 @@ extern "C" JNIEXPORT jlong JNICALL Java_org_maplibre_android_cesium_CesiumTilesL
     auto* host = new mln::cesium::CesiumTilesHost(std::move(url), maximumScreenSpaceError, heightOffsetMeters);
     return reinterpret_cast<jlong>(host);
 }
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_org_maplibre_android_cesium_CesiumTilesLayer_nativeIsLoading(JNIEnv*, jclass, jlong hostPointer) {
+    auto* host = reinterpret_cast<mln::cesium::CesiumTilesHost*>(hostPointer);
+    if (!mln::cesium::CesiumTilesHost::isAlive(host)) return JNI_FALSE;
+    return host->isLoading() ? JNI_TRUE : JNI_FALSE;
+}
