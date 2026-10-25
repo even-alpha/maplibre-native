@@ -6,12 +6,32 @@
 #include <mln/gfx/backend.hpp>
 #include <mln/gfx/headless_frontend.hpp>
 #include <mln/style/style.hpp>
+#include <mln/style/layers/custom_layer.hpp>
+#if MLN_WITH_CESIUM_TILES
+#include <mln/cesium/cesium_tiles_host.hpp>
+#endif
 
 #include <args.hxx>
 
+#include <chrono>
 #include <cstdlib>
+#include <functional>
 #include <iostream>
 #include <fstream>
+#include <thread>
+
+namespace {
+
+// Lets the tool add runtime layers (the Cesium tiles layer) once the style has loaded.
+class StyleObserver : public mln::MapObserver {
+public:
+    std::function<void()> onStyleLoaded;
+    void onDidFinishLoadingStyle() override {
+        if (onStyleLoaded) onStyleLoaded();
+    }
+};
+
+} // namespace
 
 int main(int argc, char* argv[]) {
     args::ArgumentParser argumentParser("MapLibre Native render tool");
@@ -51,6 +71,11 @@ int main(int argc, char* argv[]) {
 
     args::ValueFlag<std::string> mapModeValue(
         argumentParser, "MapMode", "Map mode (e.g. 'static', 'tile', 'continuous')", {'m', "mode"});
+    args::ValueFlag<std::string> tilesetValue(
+        argumentParser,
+        "URL",
+        "OGC 3D Tiles tileset.json drawn as a Cesium layer; frames are rendered until its tiles have loaded",
+        {"tileset"});
 
     try {
         argumentParser.ParseCLI(argc, argv);
@@ -109,9 +134,10 @@ int main(int argc, char* argv[]) {
     }
 
     HeadlessFrontend frontend({width, height}, static_cast<float>(pixelRatio));
+    StyleObserver observer;
     Map map(
         frontend,
-        MapObserver::nullObserver(),
+        observer,
         MapOptions().withMapMode(mapMode).withSize(frontend.getSize()).withPixelRatio(static_cast<float>(pixelRatio)),
         ResourceOptions()
             .withCachePath(cache_file)
@@ -149,8 +175,42 @@ int main(int argc, char* argv[]) {
                            : mln::MapDebugOptions::NoDebug);
     }
 
+#if MLN_WITH_CESIUM_TILES
+    mln::cesium::CesiumTilesHost* tilesHost = nullptr;
+    if (tilesetValue) {
+        const std::string tilesetUrl = args::get(tilesetValue);
+        observer.onStyleLoaded = [&map, &tilesHost, tilesetUrl] {
+            if (map.getStyle().getLayer("cesium-tiles")) return;
+            auto host = std::make_unique<mln::cesium::CesiumTilesHost>(tilesetUrl);
+            tilesHost = host.get();
+            map.getStyle().addLayer(std::make_unique<mln::style::CustomLayer>("cesium-tiles", std::move(host)));
+        };
+    }
+#else
+    if (tilesetValue) {
+        std::cout << "--tileset needs a build with MLN_WITH_CESIUM_TILES=ON" << std::endl;
+        exit(1);
+    }
+#endif
+
     try {
-        std::string png = encodePNG(frontend.render(map).image);
+        auto rendered = frontend.render(map);
+#if MLN_WITH_CESIUM_TILES
+        if (tilesetValue) {
+            // The tiles stream in over many frames: keep rendering until the layer reports the
+            // view's tiles loaded (and a couple of frames past it, so the last uploads draw), or
+            // give up after a while and write what there is.
+            int settled = 0;
+            for (int i = 0; i < 400 && settled < 3; ++i) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                rendered = frontend.render(map);
+                const float progress = tilesHost ? tilesHost->loadProgress() : 0.0f;
+                settled = progress >= 100.0f ? settled + 1 : 0;
+                if (i % 20 == 0) std::cerr << "tiles: " << progress << "% loaded" << std::endl;
+            }
+        }
+#endif
+        std::string png = encodePNG(rendered.image);
         if (output == "-") {
             std::cout.write(png.data(), png.size());
         } else {

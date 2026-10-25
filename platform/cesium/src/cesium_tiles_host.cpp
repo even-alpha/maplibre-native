@@ -598,5 +598,9 @@ void CesiumTilesHost::deinitialize() {
     impl->destroy(/*contextAlive=*/true);
 }
 
+float CesiumTilesHost::loadProgress() {
+    return impl->tileset ? impl->tileset->computeLoadProgress() : 0.0f;
+}
+
 } // namespace cesium
 } // namespace mln

@@ -32,6 +32,13 @@ target_link_libraries(
     PRIVATE mbgl-vendor-args mbgl-compiler-options mbgl-core
 )
 
+if(MLN_WITH_CESIUM_TILES)
+    if(NOT TARGET mbgl-cesium-tiles)
+        add_subdirectory(${PROJECT_SOURCE_DIR}/platform/cesium ${CMAKE_BINARY_DIR}/platform/cesium)
+    endif()
+    target_link_libraries(mbgl-render PRIVATE mbgl-cesium-tiles)
+endif()
+
 if(WIN32)
     find_package(libuv REQUIRED)
 

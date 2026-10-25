@@ -28,6 +28,10 @@ public:
     void contextLost() override;
     void deinitialize() override;
 
+    /// How much of what the last view needs has loaded, 0..100. Lets a still render keep
+    /// drawing frames until the tiles it shows are in.
+    float loadProgress();
+
 private:
     class Impl;
     std::unique_ptr<Impl> impl;

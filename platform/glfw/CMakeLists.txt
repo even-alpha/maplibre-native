@@ -1,4 +1,4 @@
-if(MLN_WITH_CESIUM_TILES)
+if(MLN_WITH_CESIUM_TILES AND NOT TARGET mbgl-cesium-tiles)
     add_subdirectory(${PROJECT_SOURCE_DIR}/platform/cesium ${CMAKE_BINARY_DIR}/platform/cesium)
 endif()
 
