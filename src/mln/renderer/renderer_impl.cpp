@@ -30,6 +30,10 @@
 #include <mln/util/hash.hpp>            // drape signature: hash_combine
 #include <map>
 #include <mln/renderer/render_terrain.hpp>
+#include <mln/map/transform_state.hpp>
+#include <mln/util/projection.hpp>
+
+#include <cmath>
 #include <mln/renderer/dem_elevation_provider.hpp>
 #include <mln/renderer/layers/terrain_layer_tweaker.hpp>
 #include <mln/util/tile_cover.hpp>
@@ -49,6 +53,56 @@ constexpr auto CaptureFrameCount = 1;
 #endif // !MLN_RENDER_BACKEND_METAL
 
 namespace mln {
+
+namespace {
+
+// The height where the line of sight through the map centre meets the terrain. The map slides
+// its centre along that line to this height (keeping the view), so reporting the height under
+// the current centre instead made it hop between points on steep ground: each hop moved the
+// centre onto ground of another height, a cycle that never settled and flipped the tile cover.
+double groundAlongCenterRay(const RenderTerrain& terrain, const TransformState& state) {
+    constexpr double lowestTerrainMeters = -500.0;
+    constexpr double highestSearchMeters = 4000.0;
+    constexpr int marchSteps = 64;
+    constexpr int bisectionSteps = 20;
+
+    const LatLng center = state.getLatLng();
+    const double centerAltitude = state.getCenterAltitude();
+    const double pitch = state.getPitch();
+    const double bearing = -state.getBearing();
+    const double metresPerPixel = Projection::getMetersPerPixelAtLatitude(center.latitude(), state.getZoom());
+    const double cameraHeight = state.getCameraToCenterDistance() * metresPerPixel * std::cos(pitch);
+    const double metresPerDegreeEast = 111195.0 * std::cos(util::deg2rad(center.latitude()));
+
+    const auto groundBelow = [&](double altitude) {
+        const double shift = (altitude - centerAltitude) * std::tan(pitch);
+        const LatLng point{center.latitude() - shift * std::cos(bearing) / 111195.0,
+                           center.longitude() - shift * std::sin(bearing) / metresPerDegreeEast};
+        return terrain.getElevationForLatLng(point) - altitude;
+    };
+
+    const double top = centerAltitude + std::min(cameraHeight * 0.9, highestSearchMeters);
+    const double bottom = std::min(centerAltitude, lowestTerrainMeters);
+    double above = top;
+    if (groundBelow(above) >= 0) {
+        return terrain.getElevationForLatLng(center);
+    }
+    for (int step = 1; step <= marchSteps; ++step) {
+        const double altitude = top + (bottom - top) * step / marchSteps;
+        if (groundBelow(altitude) >= 0) {
+            double below = altitude;
+            for (int i = 0; i < bisectionSteps; ++i) {
+                const double middle = (above + below) / 2;
+                (groundBelow(middle) >= 0 ? below : above) = middle;
+            }
+            return below;
+        }
+        above = altitude;
+    }
+    return terrain.getElevationForLatLng(center);
+}
+
+} // namespace
 
 using namespace style;
 
@@ -745,8 +799,13 @@ void Renderer::Impl::render(const RenderTree& renderTree, const std::shared_ptr<
     // DEM, so this is the channel; whether the camera acts on it is the map's call
     // (Map::setCenterClampedToGround). Gated so a still map does not post a message a frame.
     if (auto* terrain = orchestrator.getRenderTerrain()) {
-        const double centerElevation = terrain->getElevationForLatLng(updateParameters->transformState.getLatLng());
-        if (std::abs(centerElevation - lastReportedCenterElevation) > 0.25) {
+        const double centerElevation = groundAlongCenterRay(*terrain, updateParameters->transformState);
+        // Reported once it has held for two frames. A height that differs every frame is the
+        // terrain under the centre still loading (or its cover flapping), and acting on each
+        // value moved the camera every frame, which kept the cover flapping.
+        const bool settled = std::abs(centerElevation - previousCenterElevation) <= 0.25;
+        previousCenterElevation = centerElevation;
+        if (settled && std::abs(centerElevation - lastReportedCenterElevation) > 0.25) {
             lastReportedCenterElevation = centerElevation;
             observer->onTerrainCenterElevationChanged(centerElevation);
         }

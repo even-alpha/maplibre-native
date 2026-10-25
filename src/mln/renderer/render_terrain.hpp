@@ -8,6 +8,7 @@
 #include <mln/gfx/vertex_buffer.hpp>
 #include <mln/gfx/index_buffer.hpp>
 #include <mln/renderer/texture_pool.hpp>
+#include <mln/renderer/dem_elevation_provider.hpp>
 #include <mln/util/mat4.hpp>
 
 #include <array>
@@ -74,6 +75,11 @@ public:
     /// source, so it is a member (not static). Returns {} when there is none.
     std::set<UnwrappedTileID> computeMeshCover(const TransformState& state,
                                                const std::shared_ptr<UpdateParameters>& updateParameters) const;
+
+    /// Elevation ranges of every DEM tile rendered so far, for the elevation-aware tile
+    /// covers; see DEMRangeCache.
+    const DEMRangeCache& getRangeCache() const { return rangeCache; }
+    uint64_t getDEMUpdateCounter() const { return demUpdateCounter; }
 
     /// Resolve the DEM render source from the orchestrator if not yet bound.
     /// Renderer::Impl::render calls this before building the frame's drape-target
@@ -392,6 +398,7 @@ private:
     // this, preventing unbounded growth while browsing (previously reached 2GB+)
     static constexpr size_t maxDEMTextures = 96;
     uint64_t demUpdateCounter = 0;
+    DEMRangeCache rangeCache;
 
 #if MLN_RENDER_BACKEND_OPENGL
     // OpenGL-only: the same DEM tiles packed into one GL_TEXTURE_2D_ARRAY so the

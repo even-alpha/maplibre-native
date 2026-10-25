@@ -108,6 +108,7 @@ private:
     /// Last terrain height reported under the map centre, so an unchanged surface does not
     /// post an observer message every frame.
     double lastReportedCenterElevation = 0.0;
+    double previousCenterElevation = 0.0;
 
     enum class RenderState {
         Never,

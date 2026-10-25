@@ -75,6 +75,7 @@ public:
                    RenderLayerReferences layersNeedPlacement_,
                    Immutable<Placement> placement_,
                    bool updateSymbolOpacities_,
+                   const RenderTerrain* terrain_,
                    double startTime_)
         : RenderTree(std::move(parameters_), startTime_),
           layerRenderItems(std::move(layerRenderItems_)),
@@ -83,13 +84,14 @@ public:
           patternAtlas(patternAtlas_),
           layersNeedPlacement(std::move(layersNeedPlacement_)),
           placement(std::move(placement_)),
-          updateSymbolOpacities(updateSymbolOpacities_) {}
+          updateSymbolOpacities(updateSymbolOpacities_),
+          terrain(terrain_) {}
 
     void prepare() override {
         MLN_TRACE_FUNC();
 
         for (auto it = layersNeedPlacement.rbegin(); it != layersNeedPlacement.rend(); ++it) {
-            placement->updateLayerBuckets(*it, parameters->transformParams.state, updateSymbolOpacities);
+            placement->updateLayerBuckets(*it, parameters->transformParams.state, updateSymbolOpacities, terrain);
         }
     }
 
@@ -111,6 +113,7 @@ public:
     RenderLayerReferences layersNeedPlacement;
     Immutable<Placement> placement;
     bool updateSymbolOpacities;
+    const RenderTerrain* terrain;
 };
 
 } // namespace
@@ -256,9 +259,9 @@ std::unique_ptr<RenderTree> RenderOrchestrator::createRenderTree(
     // The DEM tiles read here are the previous frame's, as in gl-js: the cover only has
     // to be conservative, and a DEM that is still loading converges on the next frame.
     const bool terrainEnabled = renderTerrain && renderTerrain->isEnabled();
-    const DEMElevationProvider elevationProvider{
-        terrainEnabled ? getRenderSource(renderTerrain->getSourceID()) : nullptr,
-        terrainEnabled ? renderTerrain->getExaggeration() : 1.0};
+    const DEMElevationProvider elevationProvider{terrainEnabled ? &renderTerrain->getRangeCache() : nullptr,
+                                                 terrainEnabled ? renderTerrain->getExaggeration() : 1.0,
+                                                 terrainEnabled ? renderTerrain->getDEMUpdateCounter() : 0};
     tileParameters.elevationProvider = terrainEnabled ? &elevationProvider : nullptr;
 
     const ImageDifference imageDiff = diffImages(imageImpls, updateParameters->images);
@@ -608,6 +611,7 @@ std::unique_ptr<RenderTree> RenderOrchestrator::createRenderTree(
                                             std::move(layersNeedPlacement),
                                             placementController.getPlacement(),
                                             symbolBucketsChanged,
+                                            renderTerrain.get(),
                                             startTime);
 }
 

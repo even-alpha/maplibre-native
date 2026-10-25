@@ -153,7 +153,11 @@ mat4 getGlCoordMatrix(const mat4& posMatrix,
 }
 
 PointAndCameraDistance project(const Point<float>& point, const mat4& matrix) {
-    vec4 pos = {{point.x, point.y, 0, 1}};
+    return project(point, 0.0f, matrix);
+}
+
+PointAndCameraDistance project(const Point<float>& point, float elevation, const mat4& matrix) {
+    vec4 pos = {{point.x, point.y, elevation, 1}};
     matrix::transformMat4(pos, pos, matrix);
     return {{static_cast<float>(pos[0] / pos[3]), static_cast<float>(pos[1] / pos[3])}, static_cast<float>(pos[3])};
 }

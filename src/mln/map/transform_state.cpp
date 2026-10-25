@@ -134,7 +134,13 @@ void TransformState::getProjMatrix(mat4& projMatrix, uint16_t nearZ, bool aligne
     const ScreenCoordinate offset = getCenterOffset();
 
     const double limitedPitch = util::clamp(getPitch(), 0.0, maxMercatorHorizonAngle);
-    const double cameraToSeaLevelDistance = cameraToCenterDistance + std::abs(z) / std::cos(limitedPitch);
+    // Reach the lowest dry land (the Dead Sea shore is about -430 m), not just sea level, so terrain below
+    // sea level is not cut off by the far plane when the centre sits above it.
+    constexpr double lowestTerrainMeters = -600.0;
+    const double lowestTerrainZ = lowestTerrainMeters /
+                                  Projection::getMetersPerPixelAtLatitude(getLatLng().latitude(), getZoom());
+    const double cameraToSeaLevelDistance = cameraToCenterDistance +
+                                            std::max(std::abs(z), z - lowestTerrainZ) / std::cos(limitedPitch);
 
     // Find the Z distance from the viewport center point
     // [width/2 + offset.x, height/2 + offset.y] to the top edge; to point
@@ -788,7 +794,7 @@ TileCoordinate TransformState::screenCoordinateToTileCoordinate(const ScreenCoor
         return {.p = {}, .z = 0};
     }
 
-    float targetZ = 0;
+    const double targetZ = getCenterAltitude();
 
     double flippedY = size.height - point.y;
 

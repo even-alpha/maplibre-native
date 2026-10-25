@@ -16,6 +16,7 @@ class UploadPass;
 } // namespace gfx
 
 class RenderLayer;
+class RenderTerrain;
 class CrossTileSymbolLayerIndex;
 class OverscaledTileID;
 class PatternDependency;
@@ -65,8 +66,12 @@ public:
     }
     // Places this bucket to the given placement.
     virtual void place(Placement&, const BucketPlacementData&, std::set<uint32_t>&) {}
-    virtual void updateVertices(
-        const Placement&, bool /*updateOpacities*/, const TransformState&, const RenderTile&, std::set<uint32_t>&) {}
+    virtual void updateVertices(const Placement&,
+                                bool /*updateOpacities*/,
+                                const TransformState&,
+                                const RenderTile&,
+                                const RenderTerrain*,
+                                std::set<uint32_t>&) {}
 
     const util::SimpleIdentity& getID() const { return bucketID; }
 

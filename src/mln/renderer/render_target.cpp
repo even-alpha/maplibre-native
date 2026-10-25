@@ -5,6 +5,7 @@
 #include <mln/gfx/offscreen_texture.hpp>
 #include <mln/gfx/render_pass.hpp>
 #include <mln/gfx/uniform_buffer.hpp>
+#include <mln/renderer/bucket.hpp>
 #include <mln/renderer/layer_group.hpp>
 #include <mln/renderer/layer_tweaker.hpp>
 #include <mln/renderer/paint_parameters.hpp>
@@ -121,6 +122,15 @@ RenderTarget::DrapeCoverage RenderTarget::computeDrapeCoverage(RenderOrchestrato
     // every frame. Crossing an integer zoom changes the covering tiles (contentHash) and
     // re-renders anyway. Matches maplibre-gl-js (a terrain tile's texture is per tile-z).
     coverage.zoom = static_cast<double>(static_cast<int32_t>(parameters.state.getZoom()));
+    // Same bucket fold as the frame signature in RendererImpl::render: a source updated in place
+    // (e.g. GeoJSON setData) keeps its covering tiles but gets a new bucket, and must re-render.
+    const auto foldBucket = [](std::size_t& hash, const gfx::Drawable& drawable) {
+        if (drawable.getName() != "hillshade") {
+            if (const auto& bucket = drawable.getBucket()) {
+                util::hash_combine(hash, bucket->getID().id());
+            }
+        }
+    };
     // NOTE: the paint-property epoch is deliberately NOT tracked here. gl-js keys its
     // terrain RTT cache on tile coverage + source revision, never on paint changes.
     // Tracking the global epoch re-rendered every drape target on any paint transition -
@@ -157,6 +167,7 @@ RenderTarget::DrapeCoverage RenderTarget::computeDrapeCoverage(RenderOrchestrato
                 util::hash_combine(tileHash, unwrapped.canonical.z);
                 util::hash_combine(tileHash, unwrapped.canonical.x);
                 util::hash_combine(tileHash, unwrapped.canonical.y);
+                foldBucket(tileHash, drawable);
                 coverage.contentHash += tileHash;
             }
             if (unwrapped == *drapeTileID || unwrapped.isChildOf(*drapeTileID)) {
@@ -180,6 +191,7 @@ RenderTarget::DrapeCoverage RenderTarget::computeDrapeCoverage(RenderOrchestrato
             util::hash_combine(tileHash, unwrapped.canonical.z);
             util::hash_combine(tileHash, unwrapped.canonical.x);
             util::hash_combine(tileHash, unwrapped.canonical.y);
+            foldBucket(tileHash, drawable);
             coverage.contentHash += tileHash;
         });
         if (haveExactOrDescendant || bestAncestor) {
@@ -337,13 +349,16 @@ RenderTarget::RenderResult RenderTarget::render(RenderOrchestrator& orchestrator
         // "worse" and falls through to re-render. The target's lifetime bounds
         // staleness: when its terrain tile leaves the cover it is destroyed.
         if (coverage.worseThan(bakedCoverage)) {
-            // Keeping the already-baked (better) content: record that at this
-            // signature the decision was to hold, so future identical frames skip
-            // the scan too. A real change (drawable set, zoom, properties) moves the
-            // signature and re-opens evaluation, preserving the anti-flicker intent.
-            bakedSignature = targetSignature;
-            return RenderResult::Skipped;
+            constexpr auto maxStaleHold = std::chrono::milliseconds(500);
+            const auto now = std::chrono::steady_clock::now();
+            if (!worseSince) {
+                worseSince = now;
+            }
+            if (now - *worseSince < maxStaleHold) {
+                return RenderResult::Deferred;
+            }
         }
+        worseSince.reset();
 
         // Drape render budget: this target needs a re-render, but if the per-frame cap is
         // exhausted (canRerender == false) and it already has a baked texture, defer to a

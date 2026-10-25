@@ -4,6 +4,7 @@
 #include <mln/renderer/bucket.hpp>
 #include <mln/renderer/buckets/symbol_bucket.hpp>
 #include <mln/renderer/render_layer.hpp>
+#include <mln/renderer/render_terrain.hpp>
 #include <mln/renderer/render_tile.hpp>
 #include <mln/renderer/update_parameters.hpp>
 #include <mln/tile/geometry_tile.hpp>
@@ -749,11 +750,14 @@ void Placement::commit() {
                                      : (getPrevPlacement() ? getPrevPlacement()->fadeStartTime : TimePoint{});
 }
 
-void Placement::updateLayerBuckets(const RenderLayer& layer, const TransformState& state, bool updateOpacities) const {
+void Placement::updateLayerBuckets(const RenderLayer& layer,
+                                   const TransformState& state,
+                                   bool updateOpacities,
+                                   const RenderTerrain* terrain) const {
     std::set<uint32_t> seenCrossTileIDs;
     for (const auto& item : layer.getPlacementData()) {
         if (!item.sortKeyRange || item.sortKeyRange->isFirstRange()) {
-            item.bucket.get().updateVertices(*this, updateOpacities, state, item.tile, seenCrossTileIDs);
+            item.bucket.get().updateVertices(*this, updateOpacities, state, item.tile, terrain, seenCrossTileIDs);
         }
     }
 }
@@ -775,7 +779,8 @@ Point<float> calculateVariableRenderShift(style::SymbolAnchorType anchor,
 
 bool Placement::updateBucketDynamicAttributeData(SymbolBucket& bucket,
                                                  const TransformState& state,
-                                                 const RenderTile& tile) const {
+                                                 const RenderTile& tile,
+                                                 const RenderTerrain* terrain) const {
     using namespace style;
     const auto& layout = *bucket.layout;
     const bool alongLine = layout.get<SymbolPlacement>() != SymbolPlacementType::Point;
@@ -842,6 +847,10 @@ bool Placement::updateBucketDynamicAttributeData(SymbolBucket& bucket,
         const auto labelPlaneMatrix = getLabelPlaneMatrix(
             tile.matrix, pitchWithMap, rotateWithMap, state, pixelsToTileUnits);
         std::unordered_map<std::size_t, std::pair<std::size_t, Point<float>>> placedTextShifts;
+        const bool elevated = terrain && terrain->isEnabled();
+        const auto elevationAt = [&](const Point<float>& point) {
+            return elevated ? terrain->getElevationWithExaggeration(tile.id, point.x, point.y) : 0.0f;
+        };
 
         for (std::size_t i = 0; i < bucket.text.placedSymbols.size(); ++i) {
             const PlacedSymbol& symbol = bucket.text.placedSymbols[i];
@@ -862,7 +871,8 @@ bool Placement::updateBucketDynamicAttributeData(SymbolBucket& bucket,
                 hideGlyphs(symbol.glyphOffsets.size(), bucket.text.dynamicAttributeData());
             } else {
                 const Point<float> tileAnchor = symbol.anchorPoint;
-                const auto projectedAnchor = project(tileAnchor, pitchWithMap ? tile.matrix : labelPlaneMatrix);
+                const auto projectedAnchor = project(
+                    tileAnchor, elevationAt(tileAnchor), pitchWithMap ? tile.matrix : labelPlaneMatrix);
                 const float perspectiveRatio = 0.5f +
                                                0.5f * (state.getCameraToCenterDistance() / projectedAnchor.second);
                 float renderTextSize = evaluateSizeForFeature(partiallyEvaluatedSize, symbol) * perspectiveRatio /
@@ -886,8 +896,8 @@ bool Placement::updateBucketDynamicAttributeData(SymbolBucket& bucket,
                 // plane.
                 Point<float> shiftedAnchor;
                 if (pitchWithMap) {
-                    shiftedAnchor =
-                        project(Point<float>(tileAnchor.x + shift.x, tileAnchor.y + shift.y), labelPlaneMatrix).first;
+                    const Point<float> shiftedTileAnchor(tileAnchor.x + shift.x, tileAnchor.y + shift.y);
+                    shiftedAnchor = project(shiftedTileAnchor, elevationAt(shiftedTileAnchor), labelPlaneMatrix).first;
                 } else if (rotateWithMap) {
                     auto rotated = util::rotate(shift, -state.getPitch());
                     shiftedAnchor = Point<float>(projectedAnchor.first.x + rotated.x,

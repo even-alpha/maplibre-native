@@ -47,6 +47,7 @@ mat4 getGlCoordMatrix(
 
 using PointAndCameraDistance = std::pair<Point<float>, float>;
 PointAndCameraDistance project(const Point<float>& point, const mat4& matrix);
+PointAndCameraDistance project(const Point<float>& point, float elevation, const mat4& matrix);
 
 void reprojectLineLabels(SymbolBucket::DynamicAttributeVector&,
                          const std::vector<PlacedSymbol>&,

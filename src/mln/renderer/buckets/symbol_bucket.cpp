@@ -347,6 +347,7 @@ void SymbolBucket::updateVertices(const Placement& placement,
                                   bool updateOpacities,
                                   const TransformState& state,
                                   const RenderTile& tile,
+                                  const RenderTerrain* terrain,
                                   std::set<uint32_t>& seenIds) {
     if (updateOpacities) {
         placement.updateBucketOpacities(*this, state, seenIds);
@@ -354,7 +355,7 @@ void SymbolBucket::updateVertices(const Placement& placement,
         uploaded = false;
     }
 
-    if (placement.updateBucketDynamicAttributeData(*this, state, tile)) {
+    if (placement.updateBucketDynamicAttributeData(*this, state, tile, terrain)) {
         dynamicUploaded = false;
         uploaded = false;
     }

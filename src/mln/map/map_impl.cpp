@@ -1,5 +1,8 @@
 #include <mln/layermanager/layer_manager.hpp>
 #include <mln/map/map_impl.hpp>
+#include <cmath>
+#include <mln/math/angles.hpp>
+#include <mln/util/projection.hpp>
 #include <mln/renderer/update_parameters.hpp>
 #include <mln/storage/file_source.hpp>
 #include <mln/style/style_impl.hpp>
@@ -113,6 +116,14 @@ void Map::Impl::onUpdate() {
     TimePoint timePoint = mode == MapMode::Continuous ? Clock::now() : Clock::time_point::max();
 
     transform.updateTransitions(timePoint);
+
+    if (pendingCenterElevation && !transform.inTransition()) {
+        const double elevationMeters = *pendingCenterElevation;
+        pendingCenterElevation.reset();
+        if (centerClampedToGround) {
+            clampCenterTo(elevationMeters);
+        }
+    }
 
     std::optional<Immutable<style::Terrain::Impl>> terrainImpl;
     if (auto* terrain = style->impl->getTerrain()) {
@@ -324,16 +335,58 @@ void Map::Impl::onTerrainCenterElevationChanged(double elevationMeters) {
     if (!centerClampedToGround) {
         return;
     }
+    // A running animation owns the camera: a jumpTo now would start a new (instant)
+    // transition, which finishes the running one where it stands. The renderer reports a
+    // height only when it changes, so the report is kept and applied when the animation ends.
+    if (transform.inTransition()) {
+        pendingCenterElevation = elevationMeters;
+        return;
+    }
+    if (clampCenterTo(elevationMeters)) {
+        onUpdate();
+    }
+}
+
+bool Map::Impl::clampCenterTo(double elevationMeters) {
+    const TransformState& state = transform.getState();
     // Sub-metre differences are the terrain cover shifting under a camera that just moved,
     // not the ground actually changing height; acting on them would chase itself.
     constexpr double minimumChangeMeters = 0.5;
-    if (std::abs(transform.getState().getCenterAltitude() - elevationMeters) < minimumChangeMeters) {
-        return;
+    const double rise = elevationMeters - state.getCenterAltitude();
+    if (std::abs(rise) < minimumChangeMeters) {
+        return false;
     }
-    // Raising the centre onto the terrain moves the orbit plane, not the centre's lng/lat,
-    // so this settles rather than feeding back into the next frame's sample.
-    transform.jumpTo(CameraOptions().withCenterAltitude(elevationMeters));
-    onUpdate();
+    // Keep the view: the camera stays where it is and the centre slides along the line of
+    // sight onto the new ground height, the zoom following, so nothing on screen moves. A
+    // plain altitude change lifted the whole view by the rise, a visible jump at the end of
+    // every drag over sloping ground.
+    const CameraOptions camera = transform.getCameraOptions(std::nullopt);
+    if (!camera.center || !camera.zoom) {
+        return false;
+    }
+    const double pitch = util::deg2rad(camera.pitch.value_or(0.0));
+    const double bearing = util::deg2rad(camera.bearing.value_or(0.0));
+    const LatLng center = *camera.center;
+    const double metresPerPixel = Projection::getMetersPerPixelAtLatitude(center.latitude(), *camera.zoom);
+    const double distance = state.getCameraToCenterDistance() * metresPerPixel;
+    // Up the line of sight by `rise` (down, for a negative one): that much closer to the
+    // camera, rise * tan(pitch) nearer it on the ground.
+    const double closer = rise / std::max(std::cos(pitch), 0.05);
+    const double remaining = distance - closer;
+    if (remaining < distance * 0.05) {
+        return false; // the ground is (nearly) at the camera: leave it
+    }
+    const double shift = rise * std::tan(pitch);
+    // Towards the camera, which sits opposite the bearing.
+    const double north = -shift * std::cos(bearing);
+    const double east = -shift * std::sin(bearing);
+    const LatLng anchored{center.latitude() + north / 111195.0,
+                          center.longitude() + east / (111195.0 * std::cos(util::deg2rad(center.latitude())))};
+    transform.jumpTo(CameraOptions()
+                         .withCenter(anchored)
+                         .withZoom(*camera.zoom + std::log2(distance / remaining))
+                         .withCenterAltitude(elevationMeters));
+    return true;
 }
 
 void Map::Impl::jumpTo(const CameraOptions& camera) {

@@ -15,6 +15,7 @@ class SymbolBucket;
 class SymbolInstance;
 using SymbolInstanceReferences = std::vector<std::reference_wrapper<const SymbolInstance>>;
 class UpdateParameters;
+class RenderTerrain;
 enum class PlacedSymbolOrientation : bool;
 
 class OpacityState {
@@ -122,7 +123,10 @@ public:
 
     virtual ~Placement();
     virtual void placeLayers(const RenderLayerReferences&);
-    void updateLayerBuckets(const RenderLayer&, const TransformState&, bool updateOpacities) const;
+    void updateLayerBuckets(const RenderLayer&,
+                            const TransformState&,
+                            bool updateOpacities,
+                            const RenderTerrain* terrain = nullptr) const;
     virtual float symbolFadeChange(TimePoint now) const;
     virtual bool hasTransitions(TimePoint now) const;
     virtual bool transitionsEnabled() const;
@@ -171,7 +175,10 @@ protected:
     }
 
     // Returns `true` if bucket vertices were updated; returns `false` otherwise.
-    bool updateBucketDynamicAttributeData(SymbolBucket&, const TransformState&, const RenderTile& tile) const;
+    bool updateBucketDynamicAttributeData(SymbolBucket&,
+                                          const TransformState&,
+                                          const RenderTile& tile,
+                                          const RenderTerrain* terrain) const;
     void updateBucketOpacities(SymbolBucket&, const TransformState&, std::set<uint32_t>&) const;
     void markUsedJustification(SymbolBucket&,
                                style::TextVariableAnchorType,
