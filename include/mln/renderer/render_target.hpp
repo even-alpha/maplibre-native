@@ -6,6 +6,7 @@
 #include <mln/util/size.hpp>
 #include <mln/util/color.hpp>
 
+#include <chrono>
 #include <functional>
 #include <map>
 #include <memory>
@@ -172,6 +173,12 @@ protected:
     // fewer layers / coarser fallbacks than it already shows (anti-flicker);
     // see RenderTarget::render.
     DrapeCoverage bakedCoverage;
+    // When the available coverage first became worse than the baked one. The baked
+    // content is held for a short while (see RenderTarget::render) so a tile briefly
+    // leaving the render set does not flash the drape empty, but not for good: after
+    // that the target re-renders whatever is there, or a genuinely lost layer would
+    // never leave the drape.
+    std::optional<std::chrono::steady_clock::time_point> worseSince;
     // Opt-in "render once" for immutable targets (hillshade prepare, whose DEM input is
     // baked into the prepare drawable once). When set, the target renders on its first
     // frame and is skipped after (the offscreen texture persists). NOT set for the terrain
