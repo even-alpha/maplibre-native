@@ -201,7 +201,7 @@ int main(int argc, char* argv[]) {
             // view's tiles loaded (and a couple of frames past it, so the last uploads draw), or
             // give up after a while and write what there is.
             int settled = 0;
-            for (int i = 0; i < 400 && settled < 3; ++i) {
+            for (int i = 0; i < 400 && (settled < 3 || i < 10); ++i) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(100));
                 rendered = frontend.render(map);
                 const float progress = tilesHost ? tilesHost->loadProgress() : 0.0f;

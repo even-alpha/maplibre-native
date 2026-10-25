@@ -14,6 +14,15 @@ target_include_directories(
     PUBLIC ${PROJECT_SOURCE_DIR}/platform/cesium/include
 )
 
+# cesium-native's install step does not always lay out its own headers (it did not on
+# Linux), so take them from the source tree as well: a sibling checkout by default.
+set(MLN_CESIUM_NATIVE_SOURCE_DIR "${PROJECT_SOURCE_DIR}/../cesium-native" CACHE PATH "cesium-native source checkout, for its headers")
+file(GLOB MLN_CESIUM_NATIVE_INCLUDE_DIRS
+    ${MLN_CESIUM_NATIVE_SOURCE_DIR}/*/include
+    ${MLN_CESIUM_NATIVE_SOURCE_DIR}/*/generated/include
+)
+target_include_directories(mbgl-cesium-tiles SYSTEM PUBLIC ${MLN_CESIUM_NATIVE_INCLUDE_DIRS})
+
 target_link_libraries(
     mbgl-cesium-tiles
     PUBLIC

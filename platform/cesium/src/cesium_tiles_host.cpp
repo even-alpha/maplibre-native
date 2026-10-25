@@ -24,6 +24,7 @@
 #include <Cesium3DTilesSelection/TilesetOptions.h>
 #include <Cesium3DTilesSelection/ViewState.h>
 #include <Cesium3DTilesSelection/ViewUpdateResult.h>
+#include <Cesium3DTilesContent/registerAllTileContentTypes.h>
 #include <CesiumAsync/AsyncSystem.h>
 #include <CesiumAsync/ITaskProcessor.h>
 #include <CesiumCurl/CurlAssetAccessor.h>
@@ -82,6 +83,9 @@ struct CpuPrimitive {
 struct LoadThreadResult {
     double originX = 0.0; // normalized web mercator, [0, 1]
     double originY = 0.0;
+    size_t vertexCount = 0;
+    double minZ = 0.0;
+    double maxZ = 0.0;
     std::vector<CpuPrimitive> primitives;
     std::map<int32_t, CesiumUtility::IntrusivePointer<CesiumImage::ImageAsset>> images;
 };
@@ -98,6 +102,9 @@ struct GpuPrimitive {
 struct GpuTile {
     double originX = 0.0;
     double originY = 0.0;
+    size_t vertexCount = 0;
+    double minZ = 0.0;
+    double maxZ = 0.0;
     std::vector<GpuPrimitive> primitives;
     std::map<int32_t, GLuint> textures;
 };
@@ -118,8 +125,11 @@ void readIndices(const CesiumGltf::Model& model, int32_t accessor, std::vector<u
     }
 }
 
-// Turns a loaded glTF into mercator geometry. Runs on a load thread.
-std::unique_ptr<LoadThreadResult> buildTile(const CesiumGltf::Model& model, const glm::dmat4& tileTransform) {
+// Turns a loaded glTF into mercator geometry. Runs on a load thread. `heightOffset` lifts
+// or lowers the whole tileset (metres), for data whose vertical datum is off.
+std::unique_ptr<LoadThreadResult> buildTile(const CesiumGltf::Model& model,
+                                            const glm::dmat4& tileTransform,
+                                            double heightOffset) {
     auto out = std::make_unique<LoadThreadResult>();
     // The tile transform takes glTF content to ECEF; glTF is y-up and 3D Tiles are z-up,
     // and the loader records which applies in the model's extras.
@@ -216,15 +226,20 @@ std::unique_ptr<LoadThreadResult> buildTile(const CesiumGltf::Model& model, cons
     if (count == 0) return nullptr;
     out->originX = sum.x / static_cast<double>(count);
     out->originY = sum.y / static_cast<double>(count);
+    out->vertexCount = count;
+    out->minZ = std::numeric_limits<double>::max();
+    out->maxZ = std::numeric_limits<double>::lowest();
 
     for (auto& p : pending) {
         auto& v = p.primitive.vertices;
         v.reserve(p.mercator.size() * 5);
         for (size_t i = 0; i < p.mercator.size(); ++i) {
             const glm::dvec3& m = p.mercator[i];
+            out->minZ = std::min(out->minZ, m.z + heightOffset);
+            out->maxZ = std::max(out->maxZ, m.z + heightOffset);
             v.push_back(static_cast<float>((m.x - out->originX) * offsetScale));
             v.push_back(static_cast<float>((m.y - out->originY) * offsetScale));
-            v.push_back(static_cast<float>(m.z));
+            v.push_back(static_cast<float>(m.z + heightOffset));
             const glm::vec2 uv = i < p.uv.size() ? p.uv[i] : glm::vec2{0.0f, 0.0f};
             v.push_back(uv.x);
             v.push_back(uv.y);
@@ -239,6 +254,7 @@ std::unique_ptr<LoadThreadResult> buildTile(const CesiumGltf::Model& model, cons
 class RendererResources final : public Cesium3DTilesSelection::IPrepareRendererResources {
 public:
     bool contextAlive = true;
+    double heightOffset = 0.0;
 
     CesiumAsync::Future<Cesium3DTilesSelection::TileLoadResultAndRenderResources> prepareInLoadThread(
         const CesiumAsync::AsyncSystem& asyncSystem,
@@ -247,7 +263,7 @@ public:
         const std::any&) override {
         void* result = nullptr;
         if (const auto* model = std::get_if<CesiumGltf::Model>(&tileLoadResult.contentKind)) {
-            result = buildTile(*model, transform).release();
+            result = buildTile(*model, transform, heightOffset).release();
         }
         return asyncSystem.createResolvedFuture(
             Cesium3DTilesSelection::TileLoadResultAndRenderResources{std::move(tileLoadResult), result});
@@ -260,6 +276,9 @@ public:
         auto tile = std::make_unique<GpuTile>();
         tile->originX = loaded->originX;
         tile->originY = loaded->originY;
+        tile->vertexCount = loaded->vertexCount;
+        tile->minZ = loaded->minZ;
+        tile->maxZ = loaded->maxZ;
 
         for (const auto& [index, asset] : loaded->images) {
             GLenum format = GL_RGBA;
@@ -412,6 +431,9 @@ public:
 
     std::string url;
     double maximumScreenSpaceError;
+    // Metres added to every vertex's height. cesium-native culls and picks detail in the
+    // data's own frame, so the camera it sees is moved the other way (viewFor).
+    double heightOffset = 0.0;
 
     std::shared_ptr<RendererResources> resources;
     std::unique_ptr<Cesium3DTilesSelection::Tileset> tileset;
@@ -426,6 +448,8 @@ public:
 
     std::chrono::steady_clock::time_point lastFrame = std::chrono::steady_clock::now();
     uint64_t frame = 0;
+    size_t tilesRenderedLastFrame = 0;
+    size_t tilesLoggedLastTime = 0;
 
     void createProgram() {
         const GLuint vs = compileShader(GL_VERTEX_SHADER, vertexSource);
@@ -453,7 +477,12 @@ public:
     }
 
     void createTileset() {
+        // Teaches cesium-native the tile formats (b3dm, i3dm, pnts, cmpt, glb); without this
+        // every tile is taken for an external tileset.json.
+        Cesium3DTilesContent::registerAllTileContentTypes();
+        if (const char* offset = std::getenv("MLN_CESIUM_HEIGHT_OFFSET")) heightOffset = std::atof(offset);
         resources = std::make_shared<RendererResources>();
+        resources->heightOffset = heightOffset;
         asyncSystem.emplace(std::make_shared<ThreadTaskProcessor>());
         Cesium3DTilesSelection::TilesetExternals externals{
             std::make_shared<CesiumCurl::CurlAssetAccessor>(),
@@ -463,6 +492,7 @@ public:
         Cesium3DTilesSelection::TilesetOptions options;
         options.maximumScreenSpaceError = maximumScreenSpaceError;
         options.maximumCachedBytes = 256LL * 1024 * 1024;
+        if (std::getenv("MLN_CESIUM_NO_CULL")) options.enableFrustumCulling = false; // diagnostics
         tileset = std::make_unique<Cesium3DTilesSelection::Tileset>(externals, url, options);
         Log::Info(Event::Render, "Cesium tiles: loading " + url);
     }
@@ -497,7 +527,9 @@ public:
         const glm::dvec3 centreEcef = ellipsoid.cartographicToCartesian(CesiumGeospatial::Cartographic(lon, lat, 0.0));
         const glm::dmat4 enuToEcef = CesiumGeospatial::GlobeTransforms::eastNorthUpToFixedFrame(centreEcef, ellipsoid);
         const glm::dmat3 rotate(enuToEcef);
-        const glm::dvec3 position = glm::dvec3(enuToEcef * glm::dvec4(cameraEnu, 1.0));
+        // In the data's frame the ground is `heightOffset` lower than drawn, so the camera is
+        // that much higher above it.
+        const glm::dvec3 position = glm::dvec3(enuToEcef * glm::dvec4(cameraEnu - glm::dvec3{0.0, 0.0, heightOffset}, 1.0));
 
         const double hfov = 2.0 * std::atan(std::tan(fov / 2.0) * p.width / p.height);
         return Cesium3DTilesSelection::ViewState(
@@ -513,23 +545,54 @@ public:
         lastFrame = now;
 
         asyncSystem->dispatchMainThreadTasks();
-        const auto& result = tileset->updateViewGroup(tileset->getDefaultViewGroup(), {viewFor(p)}, dt);
+        const auto view = viewFor(p);
+        const auto& result = tileset->updateViewGroup(tileset->getDefaultViewGroup(), {view}, dt);
         tileset->loadTiles();
+        tilesRenderedLastFrame = result.tilesToRenderThisFrame.size();
 
-        if (++frame % 120 == 1) {
+        if (++frame % 120 == 1 || result.tilesToRenderThisFrame.size() != tilesLoggedLastTime) {
+            tilesLoggedLastTime = result.tilesToRenderThisFrame.size();
+            const auto carto = CesiumGeospatial::Ellipsoid::WGS84.cartesianToCartographic(view.getPosition());
+            std::string camera = "camera off the ellipsoid";
+            if (carto) {
+                camera = "camera lon " + std::to_string(glm::degrees(carto->longitude)) + " lat " +
+                         std::to_string(glm::degrees(carto->latitude)) + " h " + std::to_string(carto->height) + " m";
+            }
             Log::Info(Event::Render,
-                      "Cesium tiles: " + std::to_string(result.tilesToRenderThisFrame.size()) + " tiles to render, " +
+                      "Cesium tiles: " + std::to_string(result.tilesToRenderThisFrame.size()) + " to render, " +
                           std::to_string(result.workerThreadTileLoadQueueLength + result.mainThreadTileLoadQueueLength) +
-                          " queued to load");
+                          " queued, " + std::to_string(result.tilesVisited) + " visited, " +
+                          std::to_string(result.tilesCulled) + " culled, root " +
+                          (tileset->getRootTile() ? "ready" : "missing") + "; " + camera);
+            for (const auto& tile : result.tilesToRenderThisFrame) {
+                const auto* content = tile->getContent().getRenderContent();
+                const auto* gpu = content ? static_cast<const GpuTile*>(content->getRenderResources()) : nullptr;
+                if (!gpu) {
+                    Log::Info(Event::Render, "  tile without GPU resources");
+                    continue;
+                }
+                const double lon = (gpu->originX - 0.5) * 360.0;
+                const double lat = glm::degrees(2.0 * std::atan(std::exp((0.5 - gpu->originY) * glm::two_pi<double>())) -
+                                                glm::half_pi<double>());
+                Log::Info(Event::Render,
+                          "  tile at lon " + std::to_string(lon) + " lat " + std::to_string(lat) + ", " +
+                              std::to_string(gpu->vertexCount) + " vertices, z " + std::to_string(gpu->minZ) + ".." +
+                              std::to_string(gpu->maxZ) + " m, " + std::to_string(gpu->primitives.size()) +
+                              " primitives, " + std::to_string(gpu->textures.size()) + " textures");
+            }
         }
 
         const double worldSize = tileSize * std::exp2(p.zoom);
         const auto& proj = p.projectionMatrix; // column-major
 
         glUseProgram(program);
-        glEnable(GL_DEPTH_TEST);
-        glDepthFunc(GL_LEQUAL);
-        glDepthMask(GL_TRUE);
+        if (std::getenv("MLN_CESIUM_NO_DEPTH")) { // diagnostics
+            glDisable(GL_DEPTH_TEST);
+        } else {
+            glEnable(GL_DEPTH_TEST);
+            glDepthFunc(GL_LEQUAL);
+            glDepthMask(GL_TRUE);
+        }
         glDisable(GL_BLEND);
         glDisable(GL_CULL_FACE);
         glDisable(GL_STENCIL_TEST);
@@ -599,7 +662,10 @@ void CesiumTilesHost::deinitialize() {
 }
 
 float CesiumTilesHost::loadProgress() {
-    return impl->tileset ? impl->tileset->computeLoadProgress() : 0.0f;
+    // cesium-native reports 100% whenever nothing is queued, which is also the case before
+    // the tileset.json has arrived or before the first tile was selected: not loaded yet.
+    if (!impl->tileset || !impl->tileset->getRootTile() || impl->tilesRenderedLastFrame == 0) return 0.0f;
+    return impl->tileset->computeLoadProgress();
 }
 
 } // namespace cesium
