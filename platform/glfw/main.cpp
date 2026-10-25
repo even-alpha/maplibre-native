@@ -7,6 +7,10 @@
 #include <mln/storage/database_file_source.hpp>
 #include <mln/storage/file_source_manager.hpp>
 #include <mln/style/style.hpp>
+#include <mln/style/layers/custom_layer.hpp>
+#if MLN_WITH_CESIUM_TILES
+#include <mln/cesium/cesium_tiles_host.hpp>
+#endif
 #include <mln/util/action_journal.hpp>
 #include <mln/util/action_journal_options.hpp>
 #include <mln/util/logging.hpp>
@@ -53,6 +57,8 @@ int main(int argc, char* argv[]) {
     args::ValueFlag<std::string> backendValue(argumentParser, "backend", "Rendering backend", {"backend"});
     args::ValueFlag<std::string> apikeyValue(argumentParser, "key", "API key", {'t', "apikey"});
     args::ValueFlag<std::string> styleValue(argumentParser, "URL", "Map stylesheet", {'s', "style"});
+    args::ValueFlag<std::string> tilesetValue(
+        argumentParser, "URL", "OGC 3D Tiles tileset.json drawn as a Cesium layer on top of the style", {"tileset"});
     args::ValueFlag<std::string> cacheDBValue(argumentParser, "file", "Cache database file name", {'c', "cache"});
     args::ValueFlag<std::string> actionJournalDirValue(
         argumentParser, "directory", "Action journal log directory", {"actionJournalDir"});
@@ -255,6 +261,20 @@ int main(int argc, char* argv[]) {
             style = url;
             view->setWindowTitle(url);
         }
+    }
+
+    if (tilesetValue) {
+#if MLN_WITH_CESIUM_TILES
+        const std::string tilesetUrl = args::get(tilesetValue);
+        view->setStyleLoadedCallback([&map, tilesetUrl] {
+            if (map.getStyle().getLayer("cesium-tiles")) return;
+            map.getStyle().addLayer(std::make_unique<mln::style::CustomLayer>(
+                "cesium-tiles", std::make_unique<mln::cesium::CesiumTilesHost>(tilesetUrl)));
+            mln::Log::Info(mln::Event::Setup, "Added the Cesium tiles layer for " + tilesetUrl);
+        });
+#else
+        mln::Log::Warning(mln::Event::Setup, "--tileset needs a build with MLN_WITH_CESIUM_TILES=ON");
+#endif
     }
 
     map.getStyle().loadURL(style);

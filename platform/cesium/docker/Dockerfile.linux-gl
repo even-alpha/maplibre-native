@@ -1,0 +1,24 @@
+# A Linux build box with Mesa, so the OpenGL ES code path (the one Android runs) can be
+# built and rendered headlessly on a Mac: `xvfb-run mbgl-render ...` writes PNGs.
+#
+#   docker build -t maplibre-linux-gl -f platform/cesium/docker/Dockerfile.linux-gl .
+#   docker run --rm -it -v "$PWD/..:/work" maplibre-linux-gl
+#
+# The repos are bind-mounted under /work; build directories stay inside them.
+FROM ubuntu:24.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential clang cmake ninja-build pkg-config ccache git ca-certificates \
+        curl zip unzip tar python3 autoconf automake libtool bison flex \
+        libcurl4-openssl-dev libglfw3-dev libuv1-dev libpng-dev libicu-dev libjpeg-turbo8-dev libwebp-dev \
+        libgl1-mesa-dev libegl1-mesa-dev libgles-dev libglx-dev mesa-utils \
+        libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev \
+        xvfb xauth \
+    && rm -rf /var/lib/apt/lists/*
+
+ENV CC=clang CXX=clang++
+# Software rendering, GL 4.5 / GLES 3.2 through llvmpipe.
+ENV LIBGL_ALWAYS_SOFTWARE=1 GALLIUM_DRIVER=llvmpipe
+WORKDIR /work
+CMD ["/bin/bash"]

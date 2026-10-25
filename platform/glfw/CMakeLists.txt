@@ -1,3 +1,7 @@
+if(MLN_WITH_CESIUM_TILES)
+    add_subdirectory(${PROJECT_SOURCE_DIR}/platform/cesium ${CMAKE_BINARY_DIR}/platform/cesium)
+endif()
+
 if(WIN32)
     find_package(glfw3 REQUIRED)
     find_package(libuv REQUIRED)
@@ -158,3 +162,7 @@ endif()
 set_property(TARGET mbgl-glfw PROPERTY FOLDER MapLibre)
 
 install(TARGETS mbgl-glfw RUNTIME DESTINATION bin)
+
+if(MLN_WITH_CESIUM_TILES)
+    target_link_libraries(mbgl-glfw PRIVATE mbgl-cesium-tiles)
+endif()

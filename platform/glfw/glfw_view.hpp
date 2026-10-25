@@ -51,6 +51,8 @@ public:
     // Callback called when the user presses the key mapped to style change.
     // The expected action is to set a new style, different to the current one.
     void setChangeStyleCallback(std::function<void()> callback);
+    /// Runs every time a style finishes loading: the place to add runtime layers to it.
+    void setStyleLoadedCallback(std::function<void()> callback) { styleLoadedCallback = std::move(callback); }
 
     void setPauseResumeCallback(std::function<void()> callback) { pauseResumeCallback = std::move(callback); };
 
@@ -158,6 +160,7 @@ private:
     double lastClick = -1;
 
     std::function<void()> changeStyleCallback;
+    std::function<void()> styleLoadedCallback;
     std::function<void()> pauseResumeCallback;
     std::function<void()> onlineStatusCallback;
     std::function<void()> resetDatabaseCallback;

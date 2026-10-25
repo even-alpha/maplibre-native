@@ -109,18 +109,21 @@ void RenderCustomLayer::update([[maybe_unused]] gfx::ShaderRegistry& shaders,
                                [[maybe_unused]] const PaintParameters& paintParameters,
                                [[maybe_unused]] const RenderTree& renderTree,
                                [[maybe_unused]] UniqueChangeRequestVec& changes) {
-    // create layer group
-    if (!layerGroup) {
-        if (auto layerGroup_ = context.createLayerGroup(
-                layerIndex, /*initialCapacity=*/1, getID(), true)) { // TODO: make render to terrain optional?
+    // check if host changed and update
+    bool hostChanged = (host != impl(baseImpl).host);
+
+    // create layer group. A 3D host (CustomLayerHost::rendersIn3D) draws in the main pass
+    // against the terrain depth instead of into the terrain drape, so its group is not
+    // rendered to terrain. The answer is the host's, so a new host gets a new group.
+    if (!layerGroup || hostChanged) {
+        const auto& newHost = impl(baseImpl).host;
+        const bool renderToTerrain = !(newHost && newHost->rendersIn3D());
+        if (auto layerGroup_ = context.createLayerGroup(layerIndex, /*initialCapacity=*/1, getID(), renderToTerrain)) {
             setLayerGroup(std::move(layerGroup_), changes);
         }
     }
 
     auto* localLayerGroup = static_cast<LayerGroup*>(layerGroup.get());
-
-    // check if host changed and update
-    bool hostChanged = (host != impl(baseImpl).host);
     if (hostChanged) {
         // If the context changed, deinitialize the previous one before initializing the new one.
         if (host && !contextDestroyed) {

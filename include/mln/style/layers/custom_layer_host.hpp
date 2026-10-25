@@ -30,6 +30,15 @@ public:
     virtual void initialize(const CustomLayerInitParameters&) = 0;
 
     /**
+     * Whether the layer draws true 3D geometry. With terrain on, a custom layer is
+     * normally rendered into the terrain's drape texture, like every other 2D layer,
+     * so it follows the ground. A 3D layer (meshes, models) must instead draw in the
+     * main pass, against the terrain's depth, so it is never draped. Without terrain
+     * both answers draw the same way.
+     */
+    virtual bool rendersIn3D() const { return false; }
+
+    /**
      * Called right before the layers start rendering.
      */
     virtual void preRender(const mln::gfx::Context&, const mln::style::CustomLayerRenderParameters&) {};

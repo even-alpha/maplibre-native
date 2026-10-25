@@ -1284,6 +1284,9 @@ void GLFWView::onDidFinishLoadingStyle() {
     if (show3DExtrusions) {
         toggle3DExtrusions(show3DExtrusions);
     }
+    if (styleLoadedCallback) {
+        styleLoadedCallback();
+    }
 }
 
 void GLFWView::toggle3DExtrusions(bool visible) {
