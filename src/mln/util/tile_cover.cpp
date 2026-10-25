@@ -150,7 +150,7 @@ std::vector<UnwrappedTileID> tileCover(const Point<double>& tl,
 
 int32_t coveringZoomLevel(double zoom, style::SourceType type, uint16_t size) noexcept {
     zoom += util::log2(util::tileSize_D / size);
-    if (type == style::SourceType::Raster || type == style::SourceType::Video) {
+    if (type == style::SourceType::Raster || type == style::SourceType::RasterDEM || type == style::SourceType::Video) {
         return static_cast<int32_t>(std::round(zoom));
     } else {
         return static_cast<int32_t>(std::floor(zoom));
@@ -221,7 +221,7 @@ std::vector<OverscaledTileID> tileCover(const TileCoverParameters& state,
     // only on the camera are computed once for the whole cover.
     // GL JS measures this to the terrain surface under the map center, not to z = 0:
     // centerCoord is fromLngLat(center, transform.elevation). Metres to normalized Mercator
-    // is 1 / (cos(lat) * 2pi * R), the same factor metersToTileUnits below uses.
+    // is 1 / (cos(lat) * 2pi * R).
     const double centerAltitudeMercator = state.transformState.getCenterAltitude() /
                                           (std::cos(util::deg2rad(transform.getLatLng().latitude())) * util::M2PI *
                                            util::EARTH_RADIUS_M);
@@ -237,13 +237,16 @@ std::vector<OverscaledTileID> tileCover(const TileCoverParameters& state,
     const double requestedCenterZoom = transform.getZoom() + (unclampedZ - std::floor(transform.getZoom()));
     const util::TileZoomFunction tileZoom(util::rad2deg(transform.getFieldOfView()));
 
-    // Elevation has to reach the frustum in the aabb's units (tiles at zoom z). The frustum
-    // is Frustum::fromInvProjMatrix's: it scales the unprojected corners by numTiles /
-    // worldSize on every axis, and the projection's z axis is in meters (see
-    // Camera::getWorldToCamera), so box heights take the same factor. Scaling them by the
-    // ground meters-per-pixel instead left the box and the frustum disagreeing by
-    // pixelsPerMeter, which culled the whole DEM root tile at modest zooms.
-    const double metersToTileUnits = numTiles / worldSize;
+    // Elevation has to reach the frustum in the frustum's own z units. Renderable heights are in
+    // meters, and Camera::getWorldToCamera converts them to pixels (pixelsPerMeter) *inside* the
+    // projection matrix, so unprojecting the clip-space corners through its inverse
+    // (Frustum::fromInvProjMatrix) gives corner z in meters, which fromInvProjMatrix then scales
+    // by numTiles / worldSize like x and y. A height therefore enters the frustum test as
+    // meters * numTiles / worldSize - not converted to pixels first. Converting it (the previous
+    // numTiles / (cos(lat) * 2pi * R)) shrank every elevated box by pixelsPerMeter (~0.13 at z13
+    // over Victoria): a 2000 m plateau tested as ~260 m, and with the camera high and steeply
+    // pitched the near field was judged off-screen and left out of the cover.
+    const double metersToFrustumZ = numTiles / worldSize;
 
     // The tile's bounds including its terrain: the flat footprint given the height of
     // the DEM covering it. Relief rising towards the camera takes up screen space that
@@ -265,8 +268,8 @@ std::vector<OverscaledTileID> tileCover(const TileCoverParameters& state,
             return node.aabb; // no DEM loaded here yet: flat, as before
         }
         AABB elevated = node.aabb;
-        elevated.min[2] = range->min * metersToTileUnits;
-        elevated.max[2] = range->max * metersToTileUnits;
+        elevated.min[2] = range->min * metersToFrustumZ;
+        elevated.max[2] = range->max * metersToFrustumZ;
         return elevated;
     };
 
@@ -413,8 +416,8 @@ std::set<UnwrappedTileID> frustumCull(const TileCoverParameters& state, const st
     const double numTiles = std::exp2(static_cast<double>(refZ));
     const double worldSize = Projection::worldSize(transform.getScale());
     const Frustum frustum = Frustum::fromInvProjMatrix(transform.getInvProjectionMatrix(), worldSize, refZ, flippedY);
-    // Meters to tile units at refZ, the frustum's own scale; see tileCover.
-    const double metersToTileUnits = numTiles / worldSize;
+    // Meters to the frustum's z units at refZ; see the same conversion in tileCover.
+    const double metersToFrustumZ = numTiles / worldSize;
 
     std::set<UnwrappedTileID> result;
     for (const auto& id : tiles) {
@@ -425,8 +428,8 @@ std::set<UnwrappedTileID> frustumCull(const TileCoverParameters& state, const st
 
         if (state.elevationProvider) {
             if (const auto range = state.elevationProvider->getTileElevationRange(id.canonical)) {
-                aabb.min[2] = range->min * metersToTileUnits;
-                aabb.max[2] = range->max * metersToTileUnits;
+                aabb.min[2] = range->min * metersToFrustumZ;
+                aabb.max[2] = range->max * metersToFrustumZ;
             }
         }
 

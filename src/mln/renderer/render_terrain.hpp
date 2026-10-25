@@ -7,8 +7,8 @@
 #include <mln/util/constants.hpp>
 #include <mln/gfx/vertex_buffer.hpp>
 #include <mln/gfx/index_buffer.hpp>
+#include <mln/renderer/terrain_cache_policy.hpp>
 #include <mln/renderer/texture_pool.hpp>
-#include <mln/renderer/dem_elevation_provider.hpp>
 #include <mln/util/mat4.hpp>
 
 #include <array>
@@ -76,10 +76,16 @@ public:
     std::set<UnwrappedTileID> computeMeshCover(const TransformState& state,
                                                const std::shared_ptr<UpdateParameters>& updateParameters) const;
 
-    /// Elevation ranges of every DEM tile rendered so far, for the elevation-aware tile
-    /// covers; see DEMRangeCache.
-    const DEMRangeCache& getRangeCache() const { return rangeCache; }
-    uint64_t getDEMUpdateCounter() const { return demUpdateCounter; }
+    /// The point the mesh-tile cap measures distance from, in normalized web-mercator [0, 1]:
+    /// the ground under the camera (the map centre when the map is not tilted).
+    static std::array<double, 2> meshTileCapOrigin(const TransformState& state);
+
+    /// The `maxTiles` tiles whose centres lie nearest `origin` (normalized web-mercator), or all
+    /// of them when there are no more than that or `maxTiles` is 0. The mesh-tile cap
+    /// (TerrainLoadBudget::maxMeshTiles) that computeMeshCover applies.
+    static std::set<UnwrappedTileID> nearestMeshTiles(std::set<UnwrappedTileID> tiles,
+                                                      size_t maxTiles,
+                                                      const std::array<double, 2>& origin);
 
     /// Resolve the DEM render source from the orchestrator if not yet bound.
     /// Renderer::Impl::render calls this before building the frame's drape-target
@@ -339,13 +345,11 @@ private:
     // Terrain layer tweaker for UBO updates
     std::unique_ptr<TerrainLayerTweaker> tweaker;
 
-    // Track which tiles have terrain drawables; the value is true when the
-    // drawable samples the tile's own DEM texture, false when it is using an
-    // ancestor tile's DEM as a fallback while its own DEM is still loading
-    // Mesh drawables by tile, with the DEM quality tier they were built with
-    // (0 = placeholder/flat, 1 = ancestor fallback, 2 = own DEM); a drawable
-    // is replaced whenever a higher tier becomes available
-    std::unordered_map<OverscaledTileID, uint8_t> tilesWithDrawables;
+    // Mesh drawables by tile, with the DEM they were built on (tier: 0 = placeholder/flat,
+    // 1 = ancestor fallback, 2 = own DEM, plus that DEM's zoom); a drawable is replaced
+    // whenever terrain::shouldRebind says a better DEM can be bound - a higher tier, or a
+    // deeper ancestor within the fallback tier
+    std::unordered_map<OverscaledTileID, terrain::DEMBinding> tilesWithDrawables;
 
     // Per-drawable scale/offset into the bound DEM texture ({1,0,0,0} unless
     // an ancestor tile's DEM is bound); read by the terrain layer tweaker
@@ -398,7 +402,6 @@ private:
     // this, preventing unbounded growth while browsing (previously reached 2GB+)
     static constexpr size_t maxDEMTextures = 96;
     uint64_t demUpdateCounter = 0;
-    DEMRangeCache rangeCache;
 
 #if MLN_RENDER_BACKEND_OPENGL
     // OpenGL-only: the same DEM tiles packed into one GL_TEXTURE_2D_ARRAY so the

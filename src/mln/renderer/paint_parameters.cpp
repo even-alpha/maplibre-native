@@ -70,7 +70,8 @@ PaintParameters::PaintParameters(gfx::Context& context_,
                                  double tileLodPitchThreshold_,
                                  TileLodMode tileLodMode_,
                                  Size renderableSize_,
-                                 const gfx::ScissorRect& scissorRect_)
+                                 const gfx::ScissorRect& scissorRect_,
+                                 bool captureRenderedFeatures_)
     : context(context_),
       backend(backend_),
       encoder(context.createCommandEncoder()),
@@ -92,7 +93,8 @@ PaintParameters::PaintParameters(gfx::Context& context_,
       tileLodScale(tileLodScale_),
       tileLodPitchThreshold(tileLodPitchThreshold_),
       tileLodMode(tileLodMode_),
-      scissorRect(scissorRect_) {
+      scissorRect(scissorRect_),
+      captureRenderedFeatures(captureRenderedFeatures_) {
     pixelsToGLUnits = {{2.0f / state.getSize().width, -2.0f / state.getSize().height}};
 
     if (state.getViewportMode() == ViewportMode::FlippedY) {
@@ -243,9 +245,30 @@ void PaintParameters::clearStencil() {
 #endif
 }
 
-bool PaintParameters::renderTileClippingMasks(const RenderTiles& renderTiles) {
+const RenderTiles& PaintParameters::overlappingDrapeTiles(const RenderTiles& tiles) {
+    if (tiles != drapeMaskSource) {
+        std::vector<std::reference_wrapper<const RenderTile>> overlapping;
+        for (const auto& tile : *tiles) {
+            if (tilesOverlap(tile.get().id, *currentDrapeTileID)) {
+                overlapping.push_back(tile);
+            }
+        }
+        context.renderingStats().numDrapeMasksSkipped += static_cast<int>(tiles->size() - overlapping.size());
+        drapeMaskSource = tiles;
+        drapeMaskTiles = std::make_shared<const std::vector<std::reference_wrapper<const RenderTile>>>(
+            std::move(overlapping));
+    }
+    return drapeMaskTiles;
+}
+
+bool PaintParameters::renderTileClippingMasks(const RenderTiles& sourceTiles) {
+    // A drape target is only drawn into by the tiles that overlap it; the masks of the rest
+    // would land outside the target.
+    const bool drape = currentDrapeTileID && sourceTiles;
+    const RenderTiles& renderTiles = drape ? overlappingDrapeTiles(sourceTiles) : sourceTiles;
+
     // We can avoid updating the mask if it already contains the same set of tiles.
-    if (!renderTiles || tileIDsCovered(renderTiles, tileClippingMaskIDs)) {
+    if (!renderTiles || renderTiles->empty() || tileIDsCovered(renderTiles, tileClippingMaskIDs)) {
         return true;
     }
 
@@ -420,6 +443,9 @@ bool PaintParameters::renderTileClippingMasks(const RenderTiles& renderTiles) {
     static_cast<gl::Context&>(context).renderingStats().stencilUpdates++;
 #endif // MLN_RENDER_BACKEND_OPENGL
 
+    if (currentDrapeTileID) {
+        context.renderingStats().numDrapeMasksDrawn += static_cast<int>(tileClippingMaskIDs.size());
+    }
     return true;
 }
 

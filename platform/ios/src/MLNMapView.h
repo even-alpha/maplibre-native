@@ -542,6 +542,19 @@ MLN_EXPORT
  */
 @property (nonatomic, assign) UIEdgeInsets frustumOffset;
 
+/**
+ Whether the map centre rides the 3D terrain surface rather than sea level.
+
+ When this is `YES`, the altitude of the map centre follows the rendered terrain
+ height under it, so pitching over tall ground keeps the camera above the ground
+ instead of sinking into it. Has no effect when terrain is not enabled.
+
+ The default value of this property is `NO`.
+
+ This property is experimental and subject to change.
+ */
+@property (nonatomic, assign, getter=isCenterClampedToGround) BOOL centerClampedToGround;
+
 // MARK: Displaying the User’s Location
 
 /**
@@ -597,6 +610,23 @@ MLN_EXPORT
  The default value of this property is `NO`
  */
 @property (nonatomic, assign) BOOL dynamicNavigationCameraAnimationDuration;
+
+/**
+ Media time at which the latest user-location animation started.
+
+ `CACurrentMediaTime()` sampled immediately before that animation, so
+ other graphics can share its clock. It stays `0` until the first location update.
+ */
+@property (nonatomic, readonly) NSTimeInterval userLocationAnimationReferenceTime;
+
+/**
+ Whether the latest location update started a constant-zoom camera animation.
+
+ `YES` only when this sample's camera transition is the constant-zoom path
+ used by `easeTo`. The puck stays on a linear animation otherwise,
+ including a starting flyTo, a target-coordinate fit, a gesture, and camera bounds.
+ */
+@property (nonatomic, readonly) BOOL userLocationCameraFollowsConstantZoomFly;
 
 /**
  A Boolean value indicating whether the map may request authorization to use location services.
@@ -839,6 +869,11 @@ MLN_EXPORT
 @property (nonatomic, getter=isScrollEnabled) BOOL scrollEnabled;
 
 /**
+ A Boolean value indicating that a gesture is currently in progress on the map.
+ */
+@property (nonatomic, readonly, getter=isGestureInProgress) BOOL gestureInProgress;
+
+/**
  The scrolling mode the user is allowed to use to interact with the map.
 
 `MLNPanScrollingModeHorizontal` only allows the user to scroll horizontally on the map,
@@ -903,8 +938,7 @@ of north, the map will automatically snap to exact north.
  haptic feedback event be played when the user rotates the map to due north
  (0°).
 
- This feature requires a device that supports haptic feedback, running iOS 10 or
- newer.
+ This feature requires a device that supports haptic feedback.
  */
 @property (nonatomic, getter=isHapticFeedbackEnabled) BOOL hapticFeedbackEnabled;
 
@@ -1037,6 +1071,36 @@ of north, the map will automatically snap to exact north.
     zoom level immediately.
  */
 - (void)setZoomLevel:(double)zoomLevel animated:(BOOL)animated;
+
+/**
+ The altitude of the map's center above sea level, in meters.
+
+ With 3D terrain on, a pan, pinch, rotate or tilt gesture moves the center up
+ onto the terrain under it, and removing the terrain brings it back down. The
+ style's root `centerAltitude` and `-setCenterAltitudeKeepingView:` set it too.
+ Moving the center this way does not change the view, but `centerCoordinate`
+ and `zoomLevel` do. A center coordinate and zoom level describe the same view
+ only at the same center altitude, so save this with them, and restore it with
+ `-setCenterAltitudeKeepingView:` before setting them.
+ */
+@property (nonatomic, readonly) CLLocationDistance centerAltitude;
+
+/**
+ Moves the map's center along the line of sight to the given altitude without
+ moving the camera.
+
+ Nothing on screen moves; `centerCoordinate` and `zoomLevel` change to describe
+ the same view from the new center. Pass 0 to put the center back at sea level.
+
+ @param altitude The new center altitude above sea level, in meters, with the
+    terrain exaggeration applied.
+ @return `NO` if nothing moved: the center is already at that altitude, the line
+    of sight nearly grazes the ground at that altitude (a pitch over about 84
+    degrees) or meets it at (or nearly at) the camera, or the minimum or maximum
+    zoom level or the camera bounds would cut the move short.
+ */
+- (BOOL)setCenterAltitudeKeepingView:(CLLocationDistance)altitude
+    NS_SWIFT_NAME(setCenterAltitudeKeepingView(_:));
 
 /**
  * The minimum zoom level at which the map can be shown.
@@ -2255,6 +2319,14 @@ of north, the map will automatically snap to exact north.
                           (nullable NSSet<NSString *> *)styleLayerIdentifiers
                                          predicate:(nullable NSPredicate *)predicate
     NS_SWIFT_NAME(visibleFeatures(in:styleLayerIdentifiers:predicate:));
+
+/**
+ If MLNMapOptions.featureInfoEnabled is set, returns the number of features rendered in the previous
+ frame for a given feature, layer and source.  A nil value for any criterion matches all values.
+ */
+- (unsigned)renderedFeatureCountForFeatureID:(nullable NSString *)featureID
+                                     LayerID:(nullable NSString *)layerID
+                                    SourceID:(nullable NSString *)sourceID;
 
 // MARK: Debugging the Map
 
