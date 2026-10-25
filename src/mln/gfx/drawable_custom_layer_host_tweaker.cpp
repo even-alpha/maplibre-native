@@ -21,9 +21,13 @@ namespace gfx {
 
 void DrawableCustomLayerHostTweaker::execute([[maybe_unused]] gfx::Drawable& drawable,
                                              mln::PaintParameters& paintParameters) {
-    // custom drawing
+    // custom drawing. A flat host gets its layer's slice of the depth range, read-only, like
+    // any 2D layer; a 3D host (meshes, models) gets the full 3D range with writes, the
+    // same depth mode the terrain surface and fill extrusions draw with, so it is
+    // occluded by the terrain drawn before it and occludes what comes after.
     auto& context = paintParameters.context;
-    context.resetState(paintParameters.depthModeForSublayer(0, gfx::DepthMaskType::ReadOnly),
+    context.resetState(host->rendersIn3D() ? paintParameters.depthModeFor3D()
+                                           : paintParameters.depthModeForSublayer(0, gfx::DepthMaskType::ReadOnly),
                        paintParameters.colorModeForRenderPass());
 
 #if MLN_RENDER_BACKEND_METAL
