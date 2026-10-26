@@ -20,7 +20,14 @@ OpenGL ES 3 inside MapLibre's projection, so it sits on the 3D terrain and is oc
   `CesiumTilesLayer.isLoading`) tells the app to keep repainting until the view is refined.
 - `MLN_CESIUM_HEIGHT_OFFSET=<metres>`: lifts or lowers a tileset whose vertical datum is off.
   Cesium's public AGI HQ sample sits at about −187 m against AWS Terrarium terrain.
-- `MLN_CESIUM_NO_DEPTH=1`, `MLN_CESIUM_NO_CULL=1`: diagnostics.
+- Diagnostics switches, as `MLN_CESIUM_<NAME>=1` in the environment or, on Android, the system
+  property `debug.mln.cesium.<name>` (`adb shell setprop debug.mln.cesium.no_draw 1`, read every
+  frame, so no rebuild): `NO_TILESET` (never load), `NO_DRAW` (load, never draw), `NO_DEPTH`,
+  `NO_CULL`, `SOLID` (paint the mesh magenta), `NO_RESTORE` (skip the GL state guard).
+- The layer restores every piece of GL state it touches before returning (`GlStateGuard`).
+  Without it, imagery tiles intermittently came out black for the whole session once a mesh
+  had drawn (about 4 cold starts in 10 on the emulator): MapLibre caches GL state, and the
+  leftover state reached its later raster work.
 
 ## Building
 

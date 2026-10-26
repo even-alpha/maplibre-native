@@ -48,14 +48,19 @@
 #include <spdlog/spdlog.h>
 #if defined(__ANDROID__)
 #include <spdlog/sinks/android_sink.h>
+#include <sys/system_properties.h>
 #endif
 
 #include <array>
 #include <chrono>
+#include <cctype>
 #include <cmath>
+#include <cstdlib>
 #include <map>
 #include <mutex>
+#include <optional>
 #include <set>
+#include <string>
 #include <thread>
 #include <variant>
 #include <vector>
@@ -71,6 +76,19 @@ constexpr double tileSize = 512.0;
 // float keeps centimetre precision over a tile a few kilometres across.
 constexpr double offsetScale = 1048576.0; // 2^20
 constexpr double earthRadius = 6378137.0;
+
+// Diagnostics switches: MLN_CESIUM_<NAME> in the environment, or on Android the system
+// property debug.mln.cesium.<name> (adb shell setprop debug.mln.cesium.no_draw 1).
+bool debugFlag(const std::string& name) {
+    if (std::getenv(("MLN_CESIUM_" + name).c_str())) return true;
+#if defined(__ANDROID__)
+    std::string property = "debug.mln.cesium.";
+    for (const char c : name) property += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    char value[PROP_VALUE_MAX] = {};
+    if (__system_property_get(property.c_str(), value) > 0 && value[0] == '1') return true;
+#endif
+    return false;
+}
 
 // ---------------------------------------------------------------- cesium-native plumbing
 
@@ -388,6 +406,73 @@ public:
                                   void*) noexcept override {}
 };
 
+// Puts back the GL state the layer touches. MapLibre caches GL state and only resets its
+// cache after a custom layer, so anything left changed can reach a later draw or upload
+// through a stale cache entry; leaving GL exactly as found keeps the layer neutral.
+class GlStateGuard {
+public:
+    GlStateGuard() {
+        glGetIntegerv(GL_CURRENT_PROGRAM, &program);
+        glGetIntegerv(GL_VERTEX_ARRAY_BINDING, &vertexArray);
+        glGetIntegerv(GL_ARRAY_BUFFER_BINDING, &arrayBuffer);
+        glGetIntegerv(GL_ACTIVE_TEXTURE, &activeTexture);
+        glGetIntegerv(GL_TEXTURE_BINDING_2D, &activeUnitTexture);
+        glActiveTexture(GL_TEXTURE0);
+        glGetIntegerv(GL_TEXTURE_BINDING_2D, &unit0Texture);
+        glActiveTexture(static_cast<GLenum>(activeTexture));
+        glGetIntegerv(GL_UNPACK_ALIGNMENT, &unpackAlignment);
+        glGetIntegerv(GL_DEPTH_FUNC, &depthFunc);
+        glGetBooleanv(GL_DEPTH_WRITEMASK, &depthMask);
+        depthTest = glIsEnabled(GL_DEPTH_TEST);
+        blend = glIsEnabled(GL_BLEND);
+        cullFace = glIsEnabled(GL_CULL_FACE);
+        stencilTest = glIsEnabled(GL_STENCIL_TEST);
+    }
+
+    ~GlStateGuard() {
+        glUseProgram(static_cast<GLuint>(program));
+        glBindVertexArray(static_cast<GLuint>(vertexArray));
+        glBindBuffer(GL_ARRAY_BUFFER, static_cast<GLuint>(arrayBuffer));
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, static_cast<GLuint>(unit0Texture));
+        glActiveTexture(static_cast<GLenum>(activeTexture));
+        glBindTexture(GL_TEXTURE_2D, static_cast<GLuint>(activeUnitTexture));
+        glPixelStorei(GL_UNPACK_ALIGNMENT, unpackAlignment);
+        glDepthFunc(static_cast<GLenum>(depthFunc));
+        glDepthMask(depthMask);
+        setEnabled(GL_DEPTH_TEST, depthTest);
+        setEnabled(GL_BLEND, blend);
+        setEnabled(GL_CULL_FACE, cullFace);
+        setEnabled(GL_STENCIL_TEST, stencilTest);
+    }
+
+    GlStateGuard(const GlStateGuard&) = delete;
+    GlStateGuard& operator=(const GlStateGuard&) = delete;
+
+private:
+    static void setEnabled(GLenum capability, GLboolean enabled) {
+        if (enabled) {
+            glEnable(capability);
+        } else {
+            glDisable(capability);
+        }
+    }
+
+    GLint program = 0;
+    GLint vertexArray = 0;
+    GLint arrayBuffer = 0;
+    GLint activeTexture = GL_TEXTURE0;
+    GLint activeUnitTexture = 0;
+    GLint unit0Texture = 0;
+    GLint unpackAlignment = 4;
+    GLint depthFunc = GL_LESS;
+    GLboolean depthMask = GL_TRUE;
+    GLboolean depthTest = GL_FALSE;
+    GLboolean blend = GL_FALSE;
+    GLboolean cullFace = GL_FALSE;
+    GLboolean stencilTest = GL_FALSE;
+};
+
 // ---------------------------------------------------------------- GL program
 
 constexpr const char* vertexSource = MLN_CESIUM_GLSL_PRELUDE
@@ -518,7 +603,7 @@ public:
         Cesium3DTilesSelection::TilesetOptions options;
         options.maximumScreenSpaceError = maximumScreenSpaceError;
         options.maximumCachedBytes = 256LL * 1024 * 1024;
-        if (std::getenv("MLN_CESIUM_NO_CULL")) options.enableFrustumCulling = false; // diagnostics
+        if (debugFlag("NO_CULL")) options.enableFrustumCulling = false; // diagnostics
         tileset = std::make_unique<Cesium3DTilesSelection::Tileset>(externals, url, options);
         Log::Info(Event::Render, "Cesium tiles: loading " + url);
     }
@@ -575,7 +660,9 @@ public:
     }
 
     void render(const style::CustomLayerRenderParameters& p) {
-        if (!program) return;
+        if (!program || debugFlag("NO_TILESET")) return;
+        std::optional<GlStateGuard> stateGuard;
+        if (!debugFlag("NO_RESTORE")) stateGuard.emplace();
         if (!tileset) createTileset();
 
         const auto now = std::chrono::steady_clock::now();
@@ -629,11 +716,13 @@ public:
             }
         }
 
+        if (debugFlag("NO_DRAW")) return;
+
         const double worldSize = tileSize * std::exp2(p.zoom);
         const auto& proj = p.projectionMatrix; // column-major
 
         glUseProgram(program);
-        if (std::getenv("MLN_CESIUM_NO_DEPTH")) { // diagnostics
+        if (debugFlag("NO_DEPTH")) { // diagnostics
             glDisable(GL_DEPTH_TEST);
         } else {
             glEnable(GL_DEPTH_TEST);
@@ -651,6 +740,8 @@ public:
         glUniform1f(uZScale, p.terrainEnabled ? static_cast<float>(p.terrainExaggeration) : 1.0f);
         glUniform1f(uZOffset, p.terrainEnabled ? 0.0f : static_cast<float>(-flatBase));
 
+        const bool solid = debugFlag("SOLID");
+        constexpr std::array<float, 4> solidColor{1.0f, 0.0f, 1.0f, 1.0f};
         for (const auto& tile : result.tilesToRenderThisFrame) {
             const auto* content = tile->getContent().getRenderContent();
             if (!content) continue;
@@ -669,8 +760,8 @@ public:
             glUniformMatrix4fv(uMatrix, 1, GL_FALSE, matrix.data());
 
             for (const auto& prim : gpu->primitives) {
-                glUniform4fv(uColor, 1, prim.color.data());
-                glUniform1i(uTextured, prim.texture ? 1 : 0);
+                glUniform4fv(uColor, 1, solid ? solidColor.data() : prim.color.data());
+                glUniform1i(uTextured, prim.texture && !solid ? 1 : 0);
                 if (prim.texture) glBindTexture(GL_TEXTURE_2D, prim.texture);
                 glBindVertexArray(prim.vao);
                 glDrawElements(GL_TRIANGLES, prim.indexCount, GL_UNSIGNED_INT, nullptr);
