@@ -434,11 +434,14 @@ ScreenCoordinate Map::pixelForLatLng(const LatLng& latLng) const {
     // e.g. the next antimeridian side is visible.
     LatLng unwrappedLatLng = latLng.wrapped();
     unwrappedLatLng.unwrapForShortestPath(impl->transform.getLatLng());
-    return impl->transform.latLngToScreenCoordinate(unwrappedLatLng);
+    // On terrain the camera orbits the ground under the map centre, so a pixel and a location
+    // are matched on the plane at that altitude, as the camera itself is placed; at sea level
+    // a tilted view would put them hundreds of metres apart. 0 without terrain.
+    return impl->transform.latLngToScreenCoordinate(unwrappedLatLng, impl->transform.getState().getCenterAltitude());
 }
 
 LatLng Map::latLngForPixel(const ScreenCoordinate& pixel, LatLng::WrapMode wrapMode) const {
-    return impl->transform.screenCoordinateToLatLng(pixel, wrapMode);
+    return impl->transform.screenCoordinateToLatLng(pixel, impl->transform.getState().getCenterAltitude(), wrapMode);
 }
 
 std::vector<ScreenCoordinate> Map::pixelsForLatLngs(const std::vector<LatLng>& latLngs) const {

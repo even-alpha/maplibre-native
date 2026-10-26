@@ -495,8 +495,14 @@ const gfx::Texture2DPtr& RenderTarget::renderModelOverlay(RenderOrchestrator& or
         return noTexture;
     }
     if (!modelOverlayTexture) {
+        // Twice the drape's resolution: a model is seen far closer than the terrain tile the
+        // drape was sized for, and thin lines would otherwise blur on it.
+        constexpr uint32_t maxOverlaySize = 2048;
+        const auto drapeSize = getTexture()->getSize();
+        const Size overlaySize{std::min(drapeSize.width * 2, maxOverlaySize),
+                               std::min(drapeSize.height * 2, maxOverlaySize)};
         modelOverlayTexture = context.createOffscreenTexture(
-            getTexture()->getSize(), gfx::TextureChannelDataType::UnsignedByte, /*depth=*/true, /*stencil=*/true);
+            overlaySize, gfx::TextureChannelDataType::UnsignedByte, /*depth=*/true, /*stencil=*/true);
         modelOverlayStale = true;
     }
     if (!modelOverlayStale) {
@@ -543,6 +549,7 @@ const gfx::Texture2DPtr& RenderTarget::renderModelOverlay(RenderOrchestrator& or
     parameters.scissorRect = previousScissorRect;
 
     modelOverlayStale = false;
+    ++modelOverlayVersion;
     return modelOverlayTexture->getTexture();
 }
 

@@ -20,6 +20,8 @@ struct ModelOverlay {
     double y0;
     double size;
     uint32_t texture;
+    /// Changes whenever the texture's content was re-rendered (e.g. to rebuild mipmaps)
+    uint64_t version;
 };
 
 /**

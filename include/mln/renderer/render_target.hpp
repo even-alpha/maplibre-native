@@ -117,6 +117,8 @@ public:
     /// models (fills, lines) into a second, transparent texture, when the drape content
     /// changed since the last overlay or there is none yet. Returns the overlay texture.
     const gfx::Texture2DPtr& renderModelOverlay(RenderOrchestrator&, PaintParameters&);
+    /// Bumped every time the model overlay is re-rendered
+    uint64_t getModelOverlayVersion() const { return modelOverlayVersion; }
 
 protected:
     void renderDrapedLayerGroups(RenderOrchestrator&, PaintParameters&, bool modelOverlayOnly = false);
@@ -168,6 +170,7 @@ protected:
     // made on first request and re-rendered only after the drape itself re-rendered.
     std::unique_ptr<gfx::OffscreenTexture> modelOverlayTexture;
     bool modelOverlayStale = true;
+    uint64_t modelOverlayVersion = 0;
     using LayerGroupMap = std::map<int32_t, LayerGroupBasePtr>;
     LayerGroupMap layerGroupsByLayerIndex;
     Color backgroundColor;

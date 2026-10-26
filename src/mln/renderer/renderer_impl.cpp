@@ -679,7 +679,11 @@ void Renderer::Impl::render(const RenderTree& renderTree, const std::shared_ptr<
 #if MLN_RENDER_BACKEND_OPENGL
                     if (texture) {
                         parameters.modelOverlays.push_back(
-                            {x0, y0, size, static_cast<gl::Texture2D&>(*texture).getTextureID()});
+                            {x0,
+                             y0,
+                             size,
+                             static_cast<gl::Texture2D&>(*texture).getTextureID(),
+                             renderTarget.getModelOverlayVersion()});
                     }
 #else
                     (void)texture;

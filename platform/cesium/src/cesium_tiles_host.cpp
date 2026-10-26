@@ -77,6 +77,9 @@ constexpr double tileSize = 512.0;
 // float keeps centimetre precision over a tile a few kilometres across.
 constexpr double offsetScale = 1048576.0; // 2^20
 constexpr double earthRadius = 6378137.0;
+// GL_EXT_texture_filter_anisotropic, not in the core GL ES 3 headers.
+constexpr GLenum textureMaxAnisotropy = 0x84FE;
+constexpr GLenum maxTextureMaxAnisotropy = 0x84FF;
 
 // Diagnostics switches: MLN_CESIUM_<NAME> in the environment, or on Android the system
 // property debug.mln.cesium.<name> (adb shell setprop debug.mln.cesium.no_draw 1).
@@ -548,7 +551,8 @@ constexpr const char* fragmentSource = MLN_CESIUM_GLSL_PRELUDE
 // The draped fills and lines painted onto the mesh: the same geometry drawn again at the
 // same depth (both programs keep gl_Position invariant), sampling the overlay texture of a
 // terrain tile at the fragment's map position. Fades out on steep faces, where a top-down
-// projection would smear down the walls.
+// projection would smear down the walls; only near-vertical faces, since a photogrammetry
+// surface is bumpy everywhere and a stricter test breaks lines into dots.
 constexpr const char* overlayVertexSource = MLN_CESIUM_GLSL_PRELUDE
     "invariant gl_Position;\n"
     "uniform mat4 u_matrix;\n"
@@ -577,7 +581,7 @@ constexpr const char* overlayFragmentSource = MLN_CESIUM_GLSL_PRELUDE
     "void main() {\n"
     "    if (any(lessThan(v_overlay, vec2(0.0))) || any(greaterThan(v_overlay, vec2(1.0)))) discard;\n"
     "    vec3 normal = normalize(cross(dFdx(v_world), dFdy(v_world)));\n"
-    "    float facingUp = smoothstep(0.35, 0.6, abs(normal.z));\n"
+    "    float facingUp = smoothstep(0.05, 0.15, abs(normal.z));\n"
     "    vec4 color = texture(u_overlay, vec2(v_overlay.x, 1.0 - v_overlay.y)) * (facingUp * u_opacity);\n"
     "    if (color.a < 0.004) discard;\n"
     "    fragColor = color;\n"
@@ -680,6 +684,9 @@ public:
     // The mesh's footprint last drawn, which the map renders draped fills and lines for
     // (modelOverlayBounds); empty while hidden. Read on the render thread only.
     std::vector<std::array<double, 4>> overlayBounds;
+    // Overlay textures whose mipmaps were built, by the content version they were built from.
+    std::map<GLuint, uint64_t> overlayMipmaps;
+    float maxAnisotropy = -1.0f; // < 0: not checked yet; 0: unsupported
 
     std::chrono::steady_clock::time_point lastFrame = std::chrono::steady_clock::now();
     uint64_t frame = 0;
@@ -1018,6 +1025,8 @@ public:
         glUniform1f(oPixelsPerMetre, static_cast<float>(1.0 / metresPerPixel));
         glUniform1f(oOpacity, static_cast<float>(opacity));
 
+        if (maxAnisotropy < 0.0f) maxAnisotropy = supportedAnisotropy();
+        std::map<GLuint, uint64_t> seen;
         for (const auto& overlay : p.modelOverlays) {
             bool bound = false;
             for (const auto& tile : result.tilesToRenderThisFrame) {
@@ -1030,9 +1039,18 @@ public:
                     continue;
                 }
                 if (!bound) {
+                    // Mipmapped and anisotropic while drawn, so a thin line stays a line at a
+                    // steep angle; the map's own sampling is put back afterwards (the texture
+                    // comes from its pool).
                     glBindTexture(GL_TEXTURE_2D, overlay.texture);
-                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+                    if (overlayMipmaps[overlay.texture] != overlay.version + 1) {
+                        glGenerateMipmap(GL_TEXTURE_2D);
+                        overlayMipmaps[overlay.texture] = overlay.version + 1;
+                    }
+                    seen[overlay.texture] = overlay.version + 1;
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
                     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+                    if (maxAnisotropy > 0.0f) glTexParameterf(GL_TEXTURE_2D, textureMaxAnisotropy, maxAnisotropy);
                     bound = true;
                 }
                 const double tx = gpu->originX * worldSize;
@@ -1054,7 +1072,27 @@ public:
                     glDrawElements(GL_TRIANGLES, prim.indexCount, GL_UNSIGNED_INT, nullptr);
                 }
             }
+            if (bound) {
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+                if (maxAnisotropy > 0.0f) glTexParameterf(GL_TEXTURE_2D, textureMaxAnisotropy, 1.0f);
+            }
         }
+        overlayMipmaps = std::move(seen);
+    }
+
+    // GL_EXT_texture_filter_anisotropic's limit, capped at 8; 0 without the extension.
+    static float supportedAnisotropy() {
+        GLint count = 0;
+        glGetIntegerv(GL_NUM_EXTENSIONS, &count);
+        for (GLint i = 0; i < count; ++i) {
+            const auto* name = reinterpret_cast<const char*>(glGetStringi(GL_EXTENSIONS, static_cast<GLuint>(i)));
+            if (name && std::string(name) == "GL_EXT_texture_filter_anisotropic") {
+                GLfloat limit = 0.0f;
+                glGetFloatv(maxTextureMaxAnisotropy, &limit);
+                return std::min(limit, 8.0f);
+            }
+        }
+        return 0.0f;
     }
 
     void destroy(bool contextAlive) {
