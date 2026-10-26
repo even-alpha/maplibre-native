@@ -20,6 +20,14 @@ OpenGL ES 3 inside MapLibre's projection, so it sits on the 3D terrain and is oc
   fade the layer in over the zoom level and the 10 degrees of pitch below them; below either it is
   idle, with no tile selection, no requests and no drawing. `setEnabled(false)` makes it idle too,
   e.g. while its server is offline. The harness reads `MLN_CESIUM_MIN_ZOOM` / `MLN_CESIUM_MIN_PITCH`.
+- Info layers on the mesh: with terrain on, the host reports the footprint it drew
+  (`CustomLayerHost::modelOverlayBounds`); for every drape tile under it the map also renders the
+  draped fills and lines alone into a transparent overlay texture (`RenderTarget::renderModelOverlay`,
+  re-rendered only when the drape itself changed; layer groups opt in with `setDrapesOntoModels`, set
+  by fill and line layers) and passes them in `CustomLayerRenderParameters::modelOverlays`. The host
+  draws the mesh a second time at the same depth (`invariant gl_Position`), sampling the overlay at
+  each fragment's map position, faded out on steep faces. `NO_OVERLAY` turns that pass off. Not done
+  for a flat map (no drape targets) or backends other than OpenGL.
 - Memory: the tile cache is capped at 128 MB and `trimMemory()` evicts everything the view does not
   show (everything, while hidden) on the next frame, without starting downloads.
 - Tiles load only while frames are drawn. `CesiumTilesHost::isLoading()` (Android:

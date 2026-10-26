@@ -219,6 +219,7 @@ void RenderFillLayer::update(gfx::ShaderRegistry& shaders,
     // Set up a layer group for fill
     if (!layerGroup) {
         if (auto layerGroup_ = context.createTileLayerGroup(layerIndex, /*initialCapacity=*/64, getID(), true)) {
+            layerGroup_->setDrapesOntoModels(true);
             setLayerGroup(std::move(layerGroup_), changes);
         } else {
             return;

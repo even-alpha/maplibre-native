@@ -98,10 +98,15 @@ struct DebugFlags {
     bool noDepth = false;
     bool solid = false;
     bool noRestore = false;
+    bool noOverlay = false;
 
     static DebugFlags read() {
-        return {debugFlag("NO_TILESET"), debugFlag("NO_DRAW"), debugFlag("NO_DEPTH"), debugFlag("SOLID"),
-                debugFlag("NO_RESTORE")};
+        return {debugFlag("NO_TILESET"),
+                debugFlag("NO_DRAW"),
+                debugFlag("NO_DEPTH"),
+                debugFlag("SOLID"),
+                debugFlag("NO_RESTORE"),
+                debugFlag("NO_OVERLAY")};
     }
 };
 
@@ -127,6 +132,8 @@ struct LoadThreadResult {
     size_t vertexCount = 0;
     double minZ = 0.0;
     double maxZ = 0.0;
+    // Footprint in normalized web mercator, for the draped-vector overlays.
+    std::array<double, 4> bounds{0.0, 0.0, 0.0, 0.0};
     std::vector<CpuPrimitive> primitives;
     std::map<int32_t, CesiumUtility::IntrusivePointer<CesiumImage::ImageAsset>> images;
 };
@@ -146,6 +153,7 @@ struct GpuTile {
     size_t vertexCount = 0;
     double minZ = 0.0;
     double maxZ = 0.0;
+    std::array<double, 4> bounds{0.0, 0.0, 0.0, 0.0};
     std::vector<GpuPrimitive> primitives;
     std::map<int32_t, GLuint> textures;
 };
@@ -270,6 +278,10 @@ std::unique_ptr<LoadThreadResult> buildTile(const CesiumGltf::Model& model,
     out->vertexCount = count;
     out->minZ = std::numeric_limits<double>::max();
     out->maxZ = std::numeric_limits<double>::lowest();
+    out->bounds = {std::numeric_limits<double>::max(),
+                   std::numeric_limits<double>::max(),
+                   std::numeric_limits<double>::lowest(),
+                   std::numeric_limits<double>::lowest()};
 
     for (auto& p : pending) {
         auto& v = p.primitive.vertices;
@@ -278,6 +290,10 @@ std::unique_ptr<LoadThreadResult> buildTile(const CesiumGltf::Model& model,
             const glm::dvec3& m = p.mercator[i];
             out->minZ = std::min(out->minZ, m.z + heightOffset);
             out->maxZ = std::max(out->maxZ, m.z + heightOffset);
+            out->bounds = {std::min(out->bounds[0], m.x),
+                           std::min(out->bounds[1], m.y),
+                           std::max(out->bounds[2], m.x),
+                           std::max(out->bounds[3], m.y)};
             v.push_back(static_cast<float>((m.x - out->originX) * offsetScale));
             v.push_back(static_cast<float>((m.y - out->originY) * offsetScale));
             v.push_back(static_cast<float>(m.z + heightOffset));
@@ -320,6 +336,7 @@ public:
         tile->vertexCount = loaded->vertexCount;
         tile->minZ = loaded->minZ;
         tile->maxZ = loaded->maxZ;
+        tile->bounds = loaded->bounds;
 
         for (const auto& [index, asset] : loaded->images) {
             GLenum format = GL_RGBA;
@@ -503,6 +520,7 @@ private:
 // ---------------------------------------------------------------- GL program
 
 constexpr const char* vertexSource = MLN_CESIUM_GLSL_PRELUDE
+    "invariant gl_Position;\n"
     "uniform mat4 u_matrix;\n"
     "uniform float u_scale;\n"
     "uniform float u_z_scale;\n"
@@ -527,6 +545,44 @@ constexpr const char* fragmentSource = MLN_CESIUM_GLSL_PRELUDE
     "    fragColor = vec4(color.rgb, 1.0) * u_opacity;\n"
     "}\n";
 
+// The draped fills and lines painted onto the mesh: the same geometry drawn again at the
+// same depth (both programs keep gl_Position invariant), sampling the overlay texture of a
+// terrain tile at the fragment's map position. Fades out on steep faces, where a top-down
+// projection would smear down the walls.
+constexpr const char* overlayVertexSource = MLN_CESIUM_GLSL_PRELUDE
+    "invariant gl_Position;\n"
+    "uniform mat4 u_matrix;\n"
+    "uniform float u_scale;\n"
+    "uniform float u_z_scale;\n"
+    "uniform float u_z_offset;\n"
+    "uniform vec2 u_overlay_offset;\n"
+    "uniform float u_overlay_scale;\n"
+    "uniform float u_pixels_per_metre;\n"
+    "layout (location = 0) in vec3 a_pos;\n"
+    "out vec2 v_overlay;\n"
+    "out vec3 v_world;\n"
+    "void main() {\n"
+    "    float z = a_pos.z * u_z_scale + u_z_offset;\n"
+    "    v_overlay = u_overlay_offset + a_pos.xy * u_overlay_scale;\n"
+    "    v_world = vec3(a_pos.xy * u_scale, z * u_pixels_per_metre);\n"
+    "    gl_Position = u_matrix * vec4(a_pos.xy * u_scale, z, 1.0);\n"
+    "}\n";
+
+constexpr const char* overlayFragmentSource = MLN_CESIUM_GLSL_PRELUDE
+    "uniform sampler2D u_overlay;\n"
+    "uniform float u_opacity;\n"
+    "in vec2 v_overlay;\n"
+    "in vec3 v_world;\n"
+    "out vec4 fragColor;\n"
+    "void main() {\n"
+    "    if (any(lessThan(v_overlay, vec2(0.0))) || any(greaterThan(v_overlay, vec2(1.0)))) discard;\n"
+    "    vec3 normal = normalize(cross(dFdx(v_world), dFdy(v_world)));\n"
+    "    float facingUp = smoothstep(0.35, 0.6, abs(normal.z));\n"
+    "    vec4 color = texture(u_overlay, vec2(v_overlay.x, 1.0 - v_overlay.y)) * (facingUp * u_opacity);\n"
+    "    if (color.a < 0.004) discard;\n"
+    "    fragColor = color;\n"
+    "}\n";
+
 GLuint compileShader(GLenum type, const char* source) {
     const GLuint shader = glCreateShader(type);
     glShaderSource(shader, 1, &source, nullptr);
@@ -543,6 +599,30 @@ GLuint compileShader(GLenum type, const char* source) {
         return 0;
     }
     return shader;
+}
+
+GLuint linkProgram(const char* vertex, const char* fragment) {
+    const GLuint vs = compileShader(GL_VERTEX_SHADER, vertex);
+    const GLuint fs = compileShader(GL_FRAGMENT_SHADER, fragment);
+    if (!vs || !fs) {
+        if (vs) glDeleteShader(vs);
+        if (fs) glDeleteShader(fs);
+        return 0;
+    }
+    GLuint program = glCreateProgram();
+    glAttachShader(program, vs);
+    glAttachShader(program, fs);
+    glLinkProgram(program);
+    glDeleteShader(vs);
+    glDeleteShader(fs);
+    GLint ok = GL_FALSE;
+    glGetProgramiv(program, GL_LINK_STATUS, &ok);
+    if (ok == GL_FALSE) {
+        Log::Error(Event::Render, "Cesium tiles program failed to link");
+        glDeleteProgram(program);
+        return 0;
+    }
+    return program;
 }
 
 } // namespace
@@ -585,6 +665,21 @@ public:
     GLint uTextured = -1;
     GLint uColor = -1;
     GLint uOpacity = -1;
+
+    GLuint overlayProgram = 0;
+    GLint oMatrix = -1;
+    GLint oScale = -1;
+    GLint oZScale = -1;
+    GLint oZOffset = -1;
+    GLint oOverlayOffset = -1;
+    GLint oOverlayScale = -1;
+    GLint oPixelsPerMetre = -1;
+    GLint oOverlay = -1;
+    GLint oOpacity = -1;
+
+    // The mesh's footprint last drawn, which the map renders draped fills and lines for
+    // (modelOverlayBounds); empty while hidden. Read on the render thread only.
+    std::vector<std::array<double, 4>> overlayBounds;
 
     std::chrono::steady_clock::time_point lastFrame = std::chrono::steady_clock::now();
     uint64_t frame = 0;
@@ -629,23 +724,20 @@ public:
     }
 
     void createProgram() {
-        const GLuint vs = compileShader(GL_VERTEX_SHADER, vertexSource);
-        const GLuint fs = compileShader(GL_FRAGMENT_SHADER, fragmentSource);
-        if (!vs || !fs) return;
-        program = glCreateProgram();
-        glAttachShader(program, vs);
-        glAttachShader(program, fs);
-        glLinkProgram(program);
-        glDeleteShader(vs);
-        glDeleteShader(fs);
-        GLint ok = GL_FALSE;
-        glGetProgramiv(program, GL_LINK_STATUS, &ok);
-        if (ok == GL_FALSE) {
-            Log::Error(Event::Render, "Cesium tiles program failed to link");
-            glDeleteProgram(program);
-            program = 0;
-            return;
+        overlayProgram = linkProgram(overlayVertexSource, overlayFragmentSource);
+        if (overlayProgram) {
+            oMatrix = glGetUniformLocation(overlayProgram, "u_matrix");
+            oScale = glGetUniformLocation(overlayProgram, "u_scale");
+            oZScale = glGetUniformLocation(overlayProgram, "u_z_scale");
+            oZOffset = glGetUniformLocation(overlayProgram, "u_z_offset");
+            oOverlayOffset = glGetUniformLocation(overlayProgram, "u_overlay_offset");
+            oOverlayScale = glGetUniformLocation(overlayProgram, "u_overlay_scale");
+            oPixelsPerMetre = glGetUniformLocation(overlayProgram, "u_pixels_per_metre");
+            oOverlay = glGetUniformLocation(overlayProgram, "u_overlay");
+            oOpacity = glGetUniformLocation(overlayProgram, "u_opacity");
         }
+        program = linkProgram(vertexSource, fragmentSource);
+        if (!program) return;
         uMatrix = glGetUniformLocation(program, "u_matrix");
         uScale = glGetUniformLocation(program, "u_scale");
         uZScale = glGetUniformLocation(program, "u_z_scale");
@@ -755,7 +847,8 @@ public:
             }
             if (!hiddenLastFrame) Log::Info(Event::Render, "Cesium tiles: hidden");
             hiddenLastFrame = true;
-            loading = false;
+            loading = !overlayBounds.empty();
+            overlayBounds.clear();
             return;
         }
         if (hiddenLastFrame) Log::Info(Event::Render, "Cesium tiles: shown");
@@ -781,6 +874,28 @@ public:
         // the tileset.json has arrived or before the first tile was selected: not loaded yet.
         progress = tileset->getRootTile() && tilesRenderedLastFrame > 0 ? tileset->computeLoadProgress() : 0.0f;
         loading = tilesQueuedLastFrame > 0 || progress < 100.0f;
+
+        // The footprint drawn this frame: the map renders draped fills and lines for it, ready
+        // the next frame, so a changed footprint asks for one more frame.
+        std::array<double, 4> footprint{std::numeric_limits<double>::max(),
+                                        std::numeric_limits<double>::max(),
+                                        std::numeric_limits<double>::lowest(),
+                                        std::numeric_limits<double>::lowest()};
+        for (const auto& tile : result.tilesToRenderThisFrame) {
+            const auto* content = tile->getContent().getRenderContent();
+            const auto* gpu = content ? static_cast<const GpuTile*>(content->getRenderResources()) : nullptr;
+            if (!gpu) continue;
+            footprint = {std::min(footprint[0], gpu->bounds[0]),
+                         std::min(footprint[1], gpu->bounds[1]),
+                         std::max(footprint[2], gpu->bounds[2]),
+                         std::max(footprint[3], gpu->bounds[3])};
+        }
+        std::vector<std::array<double, 4>> newBounds;
+        if (footprint[0] <= footprint[2]) newBounds.push_back(footprint);
+        if (newBounds != overlayBounds) {
+            overlayBounds = std::move(newBounds);
+            loading = true;
+        }
 
         if (frame % 120 == 1 || result.tilesToRenderThisFrame.size() != tilesLoggedLastTime) {
             tilesLoggedLastTime = result.tilesToRenderThisFrame.size();
@@ -872,9 +987,74 @@ public:
                 glDrawElements(GL_TRIANGLES, prim.indexCount, GL_UNSIGNED_INT, nullptr);
             }
         }
+        if (overlayProgram && !p.modelOverlays.empty() && !flags.solid && !flags.noOverlay) {
+            drawOverlays(p, result, worldSize, opacity);
+        }
+
         glBindVertexArray(0);
         glBindTexture(GL_TEXTURE_2D, 0);
         glUseProgram(0);
+    }
+
+    // The draped fills and lines on the mesh: each tile drawn again for every overlay tile it
+    // overlaps, at the depth just written, blended over it.
+    void drawOverlays(const style::CustomLayerRenderParameters& p,
+                      const Cesium3DTilesSelection::ViewUpdateResult& result,
+                      double worldSize,
+                      double opacity) {
+        const auto& proj = p.projectionMatrix;
+        const double metresPerPixel = glm::two_pi<double>() * earthRadius * std::cos(glm::radians(p.latitude)) /
+                                      worldSize;
+        glUseProgram(overlayProgram);
+        glDepthFunc(GL_LEQUAL);
+        glDepthMask(GL_FALSE);
+        glEnable(GL_BLEND);
+        glBlendFuncSeparate(GL_ONE, GL_ONE_MINUS_SRC_ALPHA, GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
+        glActiveTexture(GL_TEXTURE0);
+        glUniform1i(oOverlay, 0);
+        glUniform1f(oScale, static_cast<float>(worldSize / offsetScale));
+        glUniform1f(oZScale, p.terrainEnabled ? static_cast<float>(p.terrainExaggeration) : 1.0f);
+        glUniform1f(oZOffset, p.terrainEnabled ? 0.0f : static_cast<float>(-flatBase));
+        glUniform1f(oPixelsPerMetre, static_cast<float>(1.0 / metresPerPixel));
+        glUniform1f(oOpacity, static_cast<float>(opacity));
+
+        for (const auto& overlay : p.modelOverlays) {
+            bool bound = false;
+            for (const auto& tile : result.tilesToRenderThisFrame) {
+                const auto* content = tile->getContent().getRenderContent();
+                const auto* gpu = content ? static_cast<const GpuTile*>(content->getRenderResources()) : nullptr;
+                if (!gpu) continue;
+                const auto& b = gpu->bounds;
+                if (b[2] < overlay.x0 || b[0] > overlay.x0 + overlay.size || b[3] < overlay.y0 ||
+                    b[1] > overlay.y0 + overlay.size) {
+                    continue;
+                }
+                if (!bound) {
+                    glBindTexture(GL_TEXTURE_2D, overlay.texture);
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+                    bound = true;
+                }
+                const double tx = gpu->originX * worldSize;
+                const double ty = gpu->originY * worldSize;
+                std::array<float, 16> matrix;
+                for (size_t i = 0; i < 16; ++i) matrix[i] = static_cast<float>(proj[i]);
+                for (size_t i = 0; i < 4; ++i) {
+                    matrix[12 + i] = static_cast<float>(proj[i] * tx + proj[4 + i] * ty + proj[12 + i]);
+                }
+                glUniformMatrix4fv(oMatrix, 1, GL_FALSE, matrix.data());
+                // Tile-relative overlay position, from the tile origin in double so the
+                // shader only adds small offsets.
+                glUniform2f(oOverlayOffset,
+                            static_cast<float>((gpu->originX - overlay.x0) / overlay.size),
+                            static_cast<float>((gpu->originY - overlay.y0) / overlay.size));
+                glUniform1f(oOverlayScale, static_cast<float>(1.0 / (offsetScale * overlay.size)));
+                for (const auto& prim : gpu->primitives) {
+                    glBindVertexArray(prim.vao);
+                    glDrawElements(GL_TRIANGLES, prim.indexCount, GL_UNSIGNED_INT, nullptr);
+                }
+            }
+        }
     }
 
     void destroy(bool contextAlive) {
@@ -884,7 +1064,10 @@ public:
         asyncSystem.reset();
         resources.reset();
         if (program && contextAlive) glDeleteProgram(program);
+        if (overlayProgram && contextAlive) glDeleteProgram(overlayProgram);
         program = 0;
+        overlayProgram = 0;
+        overlayBounds.clear();
     }
 };
 
@@ -924,6 +1107,10 @@ bool CesiumTilesHost::isLoading() const {
 
 float CesiumTilesHost::loadProgress() const {
     return impl->progress;
+}
+
+std::vector<std::array<double, 4>> CesiumTilesHost::modelOverlayBounds() const {
+    return impl->overlayBounds;
 }
 
 void CesiumTilesHost::setEnabled(bool enabled) {

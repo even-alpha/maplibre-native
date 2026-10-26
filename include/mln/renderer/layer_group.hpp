@@ -113,6 +113,11 @@ public:
 
     bool shouldRenderToTerrain() { return renderToTerrain; }
 
+    /// Whether this draped group is also painted onto 3D models (meshes) standing on the
+    /// terrain: vector content - fills and lines - yes; imagery and hillshade, no.
+    bool drapesOntoModels() const { return drapeOntoModels; }
+    void setDrapesOntoModels(bool value) { drapeOntoModels = value; }
+
     /// Set observer
     void setObserver(gfx::ContextObserver*);
 
@@ -123,6 +128,7 @@ protected:
     std::vector<LayerTweakerWeakPtr> layerTweakers;
     std::string name;
     bool renderToTerrain;
+    bool drapeOntoModels = false;
     gfx::ContextObserver* observer;
 };
 

@@ -1,5 +1,10 @@
 #include <mln/renderer/renderer_impl.hpp>
 
+#if MLN_RENDER_BACKEND_OPENGL
+#include <mln/gl/texture2d.hpp>
+#endif
+#include <algorithm>
+
 #include <mln/geometry/line_atlas.hpp>
 #include <mln/gfx/backend_scope.hpp>
 #include <mln/gfx/context.hpp>
@@ -647,6 +652,41 @@ void Renderer::Impl::render(const RenderTree& renderTree, const std::shared_ptr<
                 }
             }
         });
+
+        // Draped fills and lines for the 3D models custom layers draw (their hosts'
+        // modelOverlayBounds): each drape tile under a model also renders them alone into an
+        // overlay texture, which the host paints onto its geometry. Re-rendered only when the
+        // drape itself changed.
+        parameters.modelOverlays.clear();
+        if (orchestrator.getRenderTerrain()) {
+            const auto modelBounds = orchestrator.collectModelOverlayBounds();
+            if (!modelBounds.empty()) {
+                orchestrator.visitRenderTargets([&](RenderTarget& renderTarget) {
+                    const auto& tileID = renderTarget.getDrapeTileID();
+                    if (!tileID || tileID->wrap != 0) {
+                        return;
+                    }
+                    const double size = 1.0 / std::exp2(static_cast<double>(tileID->canonical.z));
+                    const double x0 = static_cast<double>(tileID->canonical.x) * size;
+                    const double y0 = static_cast<double>(tileID->canonical.y) * size;
+                    const bool underModel = std::ranges::any_of(modelBounds, [&](const auto& b) {
+                        return b[0] < x0 + size && b[2] > x0 && b[1] < y0 + size && b[3] > y0;
+                    });
+                    if (!underModel) {
+                        return;
+                    }
+                    const auto& texture = renderTarget.renderModelOverlay(orchestrator, parameters);
+#if MLN_RENDER_BACKEND_OPENGL
+                    if (texture) {
+                        parameters.modelOverlays.push_back(
+                            {x0, y0, size, static_cast<gl::Texture2D&>(*texture).getTextureID()});
+                    }
+#else
+                    (void)texture;
+#endif
+                });
+            }
+        }
     };
 
     const auto commonClearPass = [&] {

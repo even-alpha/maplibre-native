@@ -34,6 +34,8 @@ public:
     ~CesiumTilesHost() override;
 
     bool rendersIn3D() const override { return true; }
+    /// The mesh's footprint last drawn: the map paints its draped fills and lines onto it.
+    std::vector<std::array<double, 4>> modelOverlayBounds() const override;
 
     void initialize(const style::CustomLayerInitParameters&) override;
     void render(const style::CustomLayerRenderParameters&) override;

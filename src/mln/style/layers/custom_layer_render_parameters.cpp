@@ -20,6 +20,7 @@ CustomLayerRenderParameters::CustomLayerRenderParameters(const mln::PaintParamet
     centerAltitude = state.getCenterAltitude();
     terrainEnabled = paintParameters.terrain && paintParameters.terrain->isEnabled();
     terrainExaggeration = terrainEnabled ? paintParameters.terrain->getExaggeration() : 1.0;
+    modelOverlays = paintParameters.modelOverlays;
     mat4 projMatrix;
     state.getProjMatrix(projMatrix);
     projectionMatrix = projMatrix;

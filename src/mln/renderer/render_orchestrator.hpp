@@ -175,6 +175,10 @@ public:
 
     RenderTerrain* getRenderTerrain() const { return renderTerrain.get(); }
 
+    /// Every web mercator area {x0, y0, x1, y1} where a 3D custom layer wants the draped
+    /// fills and lines painted onto its models (CustomLayerHost::modelOverlayBounds)
+    std::vector<std::array<double, 4>> collectModelOverlayBounds() const;
+
     gfx::RenderingStats::FrameRenderedFeaturesMap&& moveFrameRenderedFeatures() {
         return std::move(frameRenderedFeatures);
     }

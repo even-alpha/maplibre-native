@@ -2,12 +2,25 @@
 
 #include <memory>
 #include <array>
+#include <cstdint>
+#include <vector>
 
 namespace mln {
 
 class PaintParameters;
 
 namespace style {
+
+/// A terrain tile's draped fills and lines on a transparent background, for a 3D host to
+/// paint onto its models: the tile's web mercator square (origin x0, y0 and side `size`, in
+/// world units 0..1, y growing south) and the OpenGL texture holding it, premultiplied.
+/// Sample it like the terrain does: at (u, 1 - v) for the tile-relative position (u, v).
+struct ModelOverlay {
+    double x0;
+    double y0;
+    double size;
+    uint32_t texture;
+};
 
 /**
  * Parameters that define the current camera position for a
@@ -32,6 +45,9 @@ struct CustomLayerRenderParameters {
     /// flat plane at sea level.
     bool terrainEnabled;
     double terrainExaggeration;
+    /// Overlays for the area the host asked for in CustomLayerHost::modelOverlayBounds,
+    /// rendered this frame; empty without terrain or on backends other than OpenGL.
+    std::vector<ModelOverlay> modelOverlays;
 
     /// Standard projection matrix (nearZ = 1 tile unit).
     /// Use this for 2D/flat custom geometry.

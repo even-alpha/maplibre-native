@@ -1,3 +1,4 @@
+#include <mln/renderer/layers/render_custom_layer.hpp>
 #include <mln/renderer/render_orchestrator.hpp>
 
 #include <mln/annotation/annotation_manager.hpp>
@@ -1257,6 +1258,18 @@ void RenderOrchestrator::onRemoveUnusedStyleImages(const std::vector<std::string
     MLN_TRACE_FUNC();
 
     observer->onRemoveUnusedStyleImages(unusedImageIDs);
+}
+
+std::vector<std::array<double, 4>> RenderOrchestrator::collectModelOverlayBounds() const {
+    std::vector<std::array<double, 4>> bounds;
+    for (const auto& [id, layer] : renderLayers) {
+        if (layer && style::layerTypeInfoEquals(layer->baseImpl->getTypeInfo(),
+                                                style::CustomLayer::Impl::staticTypeInfo())) {
+            auto layerBounds = static_cast<const RenderCustomLayer&>(*layer).modelOverlayBounds();
+            bounds.insert(bounds.end(), layerBounds.begin(), layerBounds.end());
+        }
+    }
+    return bounds;
 }
 
 } // namespace mln

@@ -19,6 +19,9 @@ public:
                 const RenderTree &,
                 UniqueChangeRequestVec &) override;
 
+    /// The host's model areas for draped-vector overlays (CustomLayerHost::modelOverlayBounds)
+    std::vector<std::array<double, 4>> modelOverlayBounds() const;
+
 private:
     void transition(const TransitionParameters &) override {}
     void evaluate(const PropertyEvaluationParameters &) override;

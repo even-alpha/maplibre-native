@@ -163,4 +163,11 @@ void RenderCustomLayer::update([[maybe_unused]] gfx::ShaderRegistry& shaders,
     }
 }
 
+std::vector<std::array<double, 4>> RenderCustomLayer::modelOverlayBounds() const {
+    if (!host || contextDestroyed || needsInitialize) {
+        return {};
+    }
+    return host->modelOverlayBounds();
+}
+
 } // namespace mln

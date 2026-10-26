@@ -38,6 +38,12 @@ public:
      */
     virtual bool rendersIn3D() const { return false; }
 
+    /// Where a 3D host's models are, as web mercator rectangles {x0, y0, x1, y1} in world
+    /// units (0..1). With terrain on, the map renders its draped fills and lines for that
+    /// area into overlay textures and passes them in CustomLayerRenderParameters, so the
+    /// host can paint them onto its models. Empty (the default) asks for none.
+    virtual std::vector<std::array<double, 4>> modelOverlayBounds() const { return {}; }
+
     /**
      * Called right before the layers start rendering.
      */

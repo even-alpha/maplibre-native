@@ -11,6 +11,7 @@
 #include <mln/gfx/color_mode.hpp>
 #include <mln/gfx/scissor_rect.hpp>
 #include <mln/util/mat4.hpp>
+#include <mln/style/layers/custom_layer_render_parameters.hpp>
 
 #include <array>
 #include <map>
@@ -84,6 +85,9 @@ public:
 
     /// Set when 3D terrain is enabled; used by layer tweakers to bind DEM elevation data
     RenderTerrain* terrain = nullptr;
+
+    /// Draped-vector overlays rendered this frame for 3D custom layers' models
+    std::vector<style::ModelOverlay> modelOverlays;
 
     /// (z, x including wrap, y, 1) of the drape render target currently being
     /// rendered into, zero otherwise; backends without per-pass global uniform
