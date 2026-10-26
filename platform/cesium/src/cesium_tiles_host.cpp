@@ -102,6 +102,7 @@ struct DebugFlags {
     bool solid = false;
     bool noRestore = false;
     bool noOverlay = false;
+    bool overlayDebug = false;
 
     static DebugFlags read() {
         return {debugFlag("NO_TILESET"),
@@ -109,7 +110,8 @@ struct DebugFlags {
                 debugFlag("NO_DEPTH"),
                 debugFlag("SOLID"),
                 debugFlag("NO_RESTORE"),
-                debugFlag("NO_OVERLAY")};
+                debugFlag("NO_OVERLAY"),
+                debugFlag("OVERLAY_DEBUG")};
     }
 };
 
@@ -575,6 +577,7 @@ constexpr const char* overlayVertexSource = MLN_CESIUM_GLSL_PRELUDE
 constexpr const char* overlayFragmentSource = MLN_CESIUM_GLSL_PRELUDE
     "uniform sampler2D u_overlay;\n"
     "uniform float u_opacity;\n"
+    "uniform vec4 u_debug_tint;\n"
     "in vec2 v_overlay;\n"
     "in vec3 v_world;\n"
     "out vec4 fragColor;\n"
@@ -583,6 +586,7 @@ constexpr const char* overlayFragmentSource = MLN_CESIUM_GLSL_PRELUDE
     "    vec3 normal = normalize(cross(dFdx(v_world), dFdy(v_world)));\n"
     "    float facingUp = smoothstep(0.05, 0.15, abs(normal.z));\n"
     "    vec4 color = texture(u_overlay, vec2(v_overlay.x, 1.0 - v_overlay.y)) * (facingUp * u_opacity);\n"
+    "    color = color + u_debug_tint * (1.0 - color.a);\n"
     "    if (color.a < 0.004) discard;\n"
     "    fragColor = color;\n"
     "}\n";
@@ -680,6 +684,7 @@ public:
     GLint oPixelsPerMetre = -1;
     GLint oOverlay = -1;
     GLint oOpacity = -1;
+    GLint oDebugTint = -1;
 
     // The mesh's footprint last drawn, which the map renders draped fills and lines for
     // (modelOverlayBounds); empty while hidden. Read on the render thread only.
@@ -742,6 +747,7 @@ public:
             oPixelsPerMetre = glGetUniformLocation(overlayProgram, "u_pixels_per_metre");
             oOverlay = glGetUniformLocation(overlayProgram, "u_overlay");
             oOpacity = glGetUniformLocation(overlayProgram, "u_opacity");
+            oDebugTint = glGetUniformLocation(overlayProgram, "u_debug_tint");
         }
         program = linkProgram(vertexSource, fragmentSource);
         if (!program) return;
@@ -1039,6 +1045,20 @@ public:
                     continue;
                 }
                 if (!bound) {
+                    // OVERLAY_DEBUG: each overlay tile's area tinted by its zoom
+                    if (flags.overlayDebug) {
+                        const int z = static_cast<int>(std::lround(-std::log2(overlay.size)));
+                        static constexpr std::array<std::array<float, 4>, 6> tints{{{0.25f, 0.0f, 0.0f, 0.25f},
+                                                                                    {0.0f, 0.25f, 0.0f, 0.25f},
+                                                                                    {0.0f, 0.0f, 0.25f, 0.25f},
+                                                                                    {0.25f, 0.25f, 0.0f, 0.25f},
+                                                                                    {0.0f, 0.25f, 0.25f, 0.25f},
+                                                                                    {0.25f, 0.0f, 0.25f, 0.25f}}};
+                        const auto& tint = tints[static_cast<size_t>(std::max(0, z - 16)) % tints.size()];
+                        glUniform4fv(oDebugTint, 1, tint.data());
+                    } else {
+                        glUniform4f(oDebugTint, 0.0f, 0.0f, 0.0f, 0.0f);
+                    }
                     // Mipmapped and anisotropic while drawn, so a thin line stays a line at a
                     // steep angle; the map's own sampling is put back afterwards (the texture
                     // comes from its pool).

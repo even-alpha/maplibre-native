@@ -113,15 +113,15 @@ public:
     /// so a burst of dirty drape targets is spread across frames rather than stalling one.
     RenderResult render(RenderOrchestrator&, const RenderTree&, PaintParameters&, bool canRerender = true);
 
-    /// For a drape target under a 3D model: render the draped groups that drape onto
-    /// models (fills, lines) into a second, transparent texture, when the drape content
-    /// changed since the last overlay or there is none yet. Returns the overlay texture.
-    const gfx::Texture2DPtr& renderModelOverlay(RenderOrchestrator&, PaintParameters&);
-    /// Bumped every time the model overlay is re-rendered
-    uint64_t getModelOverlayVersion() const { return modelOverlayVersion; }
+    /// Make this drape target a model overlay: cleared transparent, it renders only the
+    /// draped groups that drape onto 3D models (fills, lines), for a custom layer to paint
+    /// onto its geometry, and caches on those groups alone.
+    void setModelOverlayOnly(bool value) { modelOverlayOnly = value; }
+    /// Bumped every time the target actually re-renders
+    uint64_t getRenderVersion() const { return renderVersion; }
 
 protected:
-    void renderDrapedLayerGroups(RenderOrchestrator&, PaintParameters&, bool modelOverlayOnly = false);
+    void renderDrapedLayerGroups(RenderOrchestrator&, PaintParameters&, bool fillsAndLinesOnly = false);
 
     /// What the draped layers would currently render into this target: how well
     /// they cover it, and a signature of the exact content
@@ -166,11 +166,8 @@ protected:
 
     gfx::Context& context;
     std::unique_ptr<gfx::OffscreenTexture> offscreenTexture;
-    // The draped fills and lines alone, transparent elsewhere, for painting onto 3D models;
-    // made on first request and re-rendered only after the drape itself re-rendered.
-    std::unique_ptr<gfx::OffscreenTexture> modelOverlayTexture;
-    bool modelOverlayStale = true;
-    uint64_t modelOverlayVersion = 0;
+    bool modelOverlayOnly = false;
+    uint64_t renderVersion = 0;
     using LayerGroupMap = std::map<int32_t, LayerGroupBasePtr>;
     LayerGroupMap layerGroupsByLayerIndex;
     Color backgroundColor;

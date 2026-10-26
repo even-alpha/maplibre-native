@@ -21,13 +21,19 @@ OpenGL ES 3 inside MapLibre's projection, so it sits on the 3D terrain and is oc
   idle, with no tile selection, no requests and no drawing. `setEnabled(false)` makes it idle too,
   e.g. while its server is offline. The harness reads `MLN_CESIUM_MIN_ZOOM` / `MLN_CESIUM_MIN_PITCH`.
 - Info layers on the mesh: with terrain on, the host reports the footprint it drew
-  (`CustomLayerHost::modelOverlayBounds`); for every drape tile under it the map also renders the
-  draped fills and lines alone into a transparent overlay texture (`RenderTarget::renderModelOverlay`,
-  re-rendered only when the drape itself changed; layer groups opt in with `setDrapesOntoModels`, set
-  by fill and line layers) and passes them in `CustomLayerRenderParameters::modelOverlays`. The host
-  draws the mesh a second time at the same depth (`invariant gl_Position`), sampling the overlay at
-  each fragment's map position, faded out on steep faces. `NO_OVERLAY` turns that pass off. Not done
-  for a flat map (no drape targets) or backends other than OpenGL.
+  (`CustomLayerHost::modelOverlayBounds`). Under it the map renders the draped fills and lines
+  alone (layer groups opt in with `setDrapesOntoModels`, set by fill and line layers) into
+  transparent 512 px overlay tiles of their own (`RendererImpl::modelOverlayPool`), not the
+  terrain's: terrain tiles stop at the DEM's zoom (15 for the Israel DTM), far too coarse for a
+  close view of a building. Starting from the terrain tiles under the model, a tile is split
+  while its texels would show larger than a device pixel, up to zoom 19 and 24 tiles. Each is a
+  drape target in overlay-only mode (`RenderTarget::setModelOverlayOnly`) with the drape cache.
+  They reach the host in `CustomLayerRenderParameters::modelOverlays`, with a version that changes
+  whenever one re-renders. The host redraws the mesh at the same depth (`invariant gl_Position`),
+  sampling them mipmapped and anisotropic, faded only on near-vertical faces. `NO_OVERLAY` turns
+  the pass off; `OVERLAY_DEBUG` tints each overlay tile by zoom. Not done for a flat map or
+  backends other than OpenGL. Zoom 20+ overlay targets came out empty on Android and are capped
+  until that is understood.
 - Memory: the tile cache is capped at 128 MB and `trimMemory()` evicts everything the view does not
   show (everything, while hidden) on the next frame, without starting downloads.
 - Tiles load only while frames are drawn. `CesiumTilesHost::isLoading()` (Android:

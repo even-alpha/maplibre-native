@@ -4,6 +4,8 @@
 #include <mln/gl/texture2d.hpp>
 #endif
 #include <algorithm>
+#include <numbers>
+#include <set>
 
 #include <mln/geometry/line_atlas.hpp>
 #include <mln/gfx/backend_scope.hpp>
@@ -58,6 +60,90 @@ constexpr auto CaptureFrameCount = 1;
 #endif // !MLN_RENDER_BACKEND_METAL
 
 namespace mln {
+
+namespace {
+
+// The tiles a model overlay is drawn on, for a model whose web mercator footprint is
+// `bounds`: starting from the terrain's drape tiles under it, a tile is split in four while it
+// would show its texels larger than a device pixel on screen (measured on the plane the camera
+// orbits), up to a fixed tile budget, so the overlay is sharp near the camera and coarse far
+// off, like any tile pyramid.
+std::set<UnwrappedTileID> modelOverlayTiles(const TransformState& state,
+                                            const std::set<UnwrappedTileID>& drapeTiles,
+                                            const std::vector<std::array<double, 4>>& bounds,
+                                            float pixelRatio,
+                                            uint32_t tileTexels) {
+    constexpr std::size_t maxTiles = 24;
+    constexpr uint8_t maxZoom = 19;
+    const double maxSpan = static_cast<double>(tileTexels) / std::max(1.0f, pixelRatio);
+    const double altitude = state.getCenterAltitude();
+
+    const auto extent = [](const UnwrappedTileID& id) {
+        const double size = 1.0 / std::exp2(static_cast<double>(id.canonical.z));
+        return std::array<double, 3>{static_cast<double>(id.canonical.x) * size,
+                                     static_cast<double>(id.canonical.y) * size,
+                                     size};
+    };
+    const auto underModel = [&](const UnwrappedTileID& id) {
+        const auto [x0, y0, size] = extent(id);
+        return std::ranges::any_of(
+            bounds, [&](const auto& b) { return b[0] < x0 + size && b[2] > x0 && b[1] < y0 + size && b[3] > y0; });
+    };
+    const auto toLatLng = [](double x, double y) {
+        const double lat = std::atan(std::sinh(std::numbers::pi * (1.0 - 2.0 * y))) * 180.0 / std::numbers::pi;
+        return LatLng(lat, x * 360.0 - 180.0);
+    };
+    // Longest on-screen side of the tile, in logical pixels; 0 when it cannot be measured
+    // (a corner behind the camera), which keeps the tile as it is.
+    const auto screenSpan = [&](const UnwrappedTileID& id) {
+        const auto [x0, y0, size] = extent(id);
+        const std::array<ScreenCoordinate, 4> corners{
+            state.latLngToScreenCoordinate(toLatLng(x0, y0), altitude),
+            state.latLngToScreenCoordinate(toLatLng(x0 + size, y0), altitude),
+            state.latLngToScreenCoordinate(toLatLng(x0 + size, y0 + size), altitude),
+            state.latLngToScreenCoordinate(toLatLng(x0, y0 + size), altitude)};
+        double span = 0.0;
+        for (std::size_t i = 0; i < corners.size(); ++i) {
+            const auto& a = corners[i];
+            const auto& b = corners[(i + 1) % corners.size()];
+            const double d = std::hypot(a.x - b.x, a.y - b.y);
+            if (!std::isfinite(d) || d > 1e6) {
+                return 0.0;
+            }
+            span = std::max(span, d);
+        }
+        return span;
+    };
+
+    std::vector<std::pair<double, UnwrappedTileID>> pending;
+    for (const auto& id : drapeTiles) {
+        if (id.wrap == 0 && underModel(id)) {
+            pending.emplace_back(screenSpan(id), id);
+        }
+    }
+    std::set<UnwrappedTileID> tiles;
+    while (!pending.empty()) {
+        const auto largest = std::ranges::max_element(pending, {}, &std::pair<double, UnwrappedTileID>::first);
+        const auto [span, id] = *largest;
+        pending.erase(largest);
+        if (span > maxSpan && id.canonical.z < maxZoom && tiles.size() + pending.size() + 4 <= maxTiles) {
+            const auto z = static_cast<uint8_t>(id.canonical.z + 1);
+            for (uint32_t dy = 0; dy < 2; ++dy) {
+                for (uint32_t dx = 0; dx < 2; ++dx) {
+                    const UnwrappedTileID child(z, id.canonical.x * 2 + dx, id.canonical.y * 2 + dy);
+                    if (underModel(child)) {
+                        pending.emplace_back(screenSpan(child), child);
+                    }
+                }
+            }
+        } else {
+            tiles.insert(id);
+        }
+    }
+    return tiles;
+}
+
+} // namespace
 
 namespace {
 
@@ -654,43 +740,67 @@ void Renderer::Impl::render(const RenderTree& renderTree, const std::shared_ptr<
         });
 
         // Draped fills and lines for the 3D models custom layers draw (their hosts'
-        // modelOverlayBounds): each drape tile under a model also renders them alone into an
-        // overlay texture, which the host paints onto its geometry. Re-rendered only when the
-        // drape itself changed.
+        // modelOverlayBounds), on tiles of their own: the terrain's tiles stop at the DEM's
+        // zoom, far coarser than a close view of a model, so the overlay is re-tiled to the
+        // view (see modelOverlayTiles) and each tile renders only those groups, cleared
+        // transparent, with the drape cache. The host paints them onto its geometry.
         parameters.modelOverlays.clear();
-        if (orchestrator.getRenderTerrain()) {
+        std::set<UnwrappedTileID> overlayTiles;
+        // Only OpenGL hands the overlay textures to custom layers (ModelOverlay::texture)
+#if MLN_RENDER_BACKEND_OPENGL
+        constexpr bool overlaysSupported = true;
+#else
+        constexpr bool overlaysSupported = false;
+#endif
+        if (overlaysSupported && orchestrator.getRenderTerrain()) {
             const auto modelBounds = orchestrator.collectModelOverlayBounds();
             if (!modelBounds.empty()) {
-                orchestrator.visitRenderTargets([&](RenderTarget& renderTarget) {
-                    const auto& tileID = renderTarget.getDrapeTileID();
-                    if (!tileID || tileID->wrap != 0) {
-                        return;
+                std::set<UnwrappedTileID> drapeTiles;
+                texturePool.visitRenderTargets([&](std::shared_ptr<RenderTarget>& renderTarget) {
+                    if (const auto& id = renderTarget->getDrapeTileID()) {
+                        drapeTiles.insert(*id);
                     }
-                    const double size = 1.0 / std::exp2(static_cast<double>(tileID->canonical.z));
-                    const double x0 = static_cast<double>(tileID->canonical.x) * size;
-                    const double y0 = static_cast<double>(tileID->canonical.y) * size;
-                    const bool underModel = std::ranges::any_of(modelBounds, [&](const auto& b) {
-                        return b[0] < x0 + size && b[2] > x0 && b[1] < y0 + size && b[3] > y0;
-                    });
-                    if (!underModel) {
-                        return;
-                    }
-                    const auto& texture = renderTarget.renderModelOverlay(orchestrator, parameters);
-#if MLN_RENDER_BACKEND_OPENGL
-                    if (texture) {
-                        parameters.modelOverlays.push_back(
-                            {x0,
-                             y0,
-                             size,
-                             static_cast<gl::Texture2D&>(*texture).getTextureID(),
-                             renderTarget.getModelOverlayVersion()});
-                    }
-#else
-                    (void)texture;
-#endif
                 });
+                overlayTiles = modelOverlayTiles(
+                    parameters.state, drapeTiles, modelBounds, parameters.pixelRatio, modelOverlayTileSize);
             }
         }
+        if (overlayTiles != lastModelOverlayTiles) {
+            std::string list;
+            for (const auto& id : overlayTiles) {
+                list += " " + util::toString(id.canonical.z) + "/" + util::toString(id.canonical.x) + "/" +
+                        util::toString(id.canonical.y);
+            }
+            Log::Debug(Event::Render, "Model overlay tiles:" + list);
+            lastModelOverlayTiles = overlayTiles;
+        }
+        for (const auto& id : overlayTiles) {
+            modelOverlayPool.createRenderTarget(context, id, Color{0.0f, 0.0f, 0.0f, 0.0f});
+        }
+        modelOverlayPool.removeStaleRenderTargets(overlayTiles);
+        modelOverlayPool.visitRenderTargets([&](std::shared_ptr<RenderTarget>& renderTarget) {
+            const auto& tileID = renderTarget->getDrapeTileID();
+            if (!tileID) {
+                return;
+            }
+            renderTarget->setModelOverlayOnly(true);
+            renderTarget->updateDrapeGlobalUBO(globalPaintParamsUBO, context);
+            // A deferred overlay (the drape cache holding old content) needs a follow-up frame
+            // like a deferred drape, or it stays stale once the view stops changing.
+            if (renderTarget->render(orchestrator, renderTree, parameters) == RenderTarget::RenderResult::Deferred) {
+                drapeWorkDeferred = true;
+            }
+#if MLN_RENDER_BACKEND_OPENGL
+            const double size = 1.0 / std::exp2(static_cast<double>(tileID->canonical.z));
+            if (const auto& texture = renderTarget->getTexture()) {
+                parameters.modelOverlays.push_back({static_cast<double>(tileID->canonical.x) * size,
+                                                    static_cast<double>(tileID->canonical.y) * size,
+                                                    size,
+                                                    static_cast<gl::Texture2D&>(*texture).getTextureID(),
+                                                    renderTarget->getRenderVersion()});
+            }
+#endif
+        });
     };
 
     const auto commonClearPass = [&] {

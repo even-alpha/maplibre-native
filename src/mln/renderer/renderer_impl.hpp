@@ -11,6 +11,7 @@
 
 #include <map>
 #include <memory>
+#include <set>
 #include <string>
 #include <mln/tile/tile_id.hpp>
 
@@ -68,6 +69,11 @@ private:
     static constexpr uint32_t drapeTileSize = 512;
     static constexpr uint32_t drapeQualityFactor = 2;
     TexturePool texturePool{drapeTileSize * drapeQualityFactor};
+    // Tiles under 3D custom-layer models that only their draped fills and lines render
+    // into, at the view's resolution rather than the terrain's (see modelOverlayTiles)
+    static constexpr uint32_t modelOverlayTileSize = 512;
+    TexturePool modelOverlayPool{modelOverlayTileSize};
+    std::set<UnwrappedTileID> lastModelOverlayTiles;
 
     gfx::RendererBackend& backend;
 

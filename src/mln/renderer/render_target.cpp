@@ -15,6 +15,7 @@
 #include <mln/util/hash.hpp>
 #include <mln/util/string.hpp>
 
+#include <atomic>
 #include <cmath>
 
 namespace mln {
@@ -138,7 +139,8 @@ RenderTarget::DrapeCoverage RenderTarget::computeDrapeCoverage(RenderOrchestrato
     // entirely (measured: all visible drape targets re-rendered every frame while
     // panning). coverage.propertiesEpoch is left at its default and no longer consulted.
     orchestrator.visitLayerGroups([&](LayerGroupBase& layerGroup) {
-        if (layerGroup.getType() != LayerGroupBase::Type::TileLayerGroup || !layerGroup.shouldRenderToTerrain()) {
+        if (layerGroup.getType() != LayerGroupBase::Type::TileLayerGroup || !layerGroup.shouldRenderToTerrain() ||
+            (modelOverlayOnly && !layerGroup.drapesOntoModels())) {
             return;
         }
         coverage.totalGroups++;
@@ -209,7 +211,7 @@ RenderTarget::DrapeCoverage RenderTarget::computeDrapeCoverage(RenderOrchestrato
 
 void RenderTarget::renderDrapedLayerGroups(RenderOrchestrator& orchestrator,
                                            PaintParameters& parameters,
-                                           bool modelOverlayOnly) {
+                                           bool fillsAndLinesOnly) {
     // Following gl-js render_to_texture: every draped layer tile that overlaps this
     // target's tile is drawn into it; the vertex shader places overlapping tiles via
     // the drape_tile fields (see apply_drape_transform), so a parent tile standing in
@@ -217,7 +219,7 @@ void RenderTarget::renderDrapedLayerGroups(RenderOrchestrator& orchestrator,
     const auto visitDrapedGroups = [&](auto&& visit, auto&& f) {
         visit([&](LayerGroupBase& layerGroup) {
             if (layerGroup.getType() == LayerGroupBase::Type::TileLayerGroup && layerGroup.shouldRenderToTerrain() &&
-                (!modelOverlayOnly || layerGroup.drapesOntoModels())) {
+                (!fillsAndLinesOnly || layerGroup.drapesOntoModels())) {
                 f(layerGroup);
             }
         });
@@ -386,7 +388,7 @@ RenderTarget::RenderResult RenderTarget::render(RenderOrchestrator& orchestrator
     parameters.renderPass = parameters.encoder->createRenderPass(
         "render target",
         {.renderable = *offscreenTexture,
-         .clearColor = backgroundColor,
+         .clearColor = modelOverlayOnly ? Color{0.0f, 0.0f, 0.0f, 0.0f} : backgroundColor,
          .clearDepth = 1.0f,
          .clearStencil = drapeTileID ? 0 : std::optional<int32_t>{}});
 #if MLN_RENDER_BACKEND_OPENGL
@@ -426,7 +428,7 @@ RenderTarget::RenderResult RenderTarget::render(RenderOrchestrator& orchestrator
     if (drapeTileID) {
         // Terrain drape target: render the orchestrator's draped layer groups
         // (their tweakers already ran in the main layer group update)
-        renderDrapedLayerGroups(orchestrator, parameters);
+        renderDrapedLayerGroups(orchestrator, parameters, modelOverlayOnly);
         parameters.currentDrapeTile = {{0, 0, 0, 0}};
         parameters.currentDrapeTileID.reset();
         // Leaving drape placement: the masks just built do not apply to what renders next
@@ -479,78 +481,13 @@ RenderTarget::RenderResult RenderTarget::render(RenderOrchestrator& orchestrator
 
     // This target now holds valid content, so it may be deferred by the drape budget later.
     hasRenderedContent = true;
-    // Its draped content changed, so a model overlay made from it is out of date.
-    if (drapeTileID) {
-        modelOverlayStale = true;
-    }
+    // Unique across targets: a target re-created over a pooled GL texture must not repeat a
+    // version an earlier target had for that texture (custom layers key mipmaps on it).
+    static std::atomic<uint64_t> nextRenderVersion{0};
+    renderVersion = ++nextRenderVersion;
 
     parameters.scissorRect = prevScissorRect;
     return RenderResult::Rendered;
-}
-
-const gfx::Texture2DPtr& RenderTarget::renderModelOverlay(RenderOrchestrator& orchestrator,
-                                                         PaintParameters& parameters) {
-    static const gfx::Texture2DPtr noTexture;
-    if (!drapeTileID) {
-        return noTexture;
-    }
-    if (!modelOverlayTexture) {
-        // Twice the drape's resolution: a model is seen far closer than the terrain tile the
-        // drape was sized for, and thin lines would otherwise blur on it.
-        constexpr uint32_t maxOverlaySize = 2048;
-        const auto drapeSize = getTexture()->getSize();
-        const Size overlaySize{std::min(drapeSize.width * 2, maxOverlaySize),
-                               std::min(drapeSize.height * 2, maxOverlaySize)};
-        modelOverlayTexture = context.createOffscreenTexture(
-            overlaySize, gfx::TextureChannelDataType::UnsignedByte, /*depth=*/true, /*stencil=*/true);
-        modelOverlayStale = true;
-    }
-    if (!modelOverlayStale) {
-        return modelOverlayTexture->getTexture();
-    }
-
-    // The same placement as the drape itself (see render), into the overlay texture and
-    // cleared transparent, with only the groups that drape onto models.
-    parameters.renderPass = parameters.encoder->createRenderPass("model overlay",
-                                                                 {.renderable = *modelOverlayTexture,
-                                                                  .clearColor = Color{0.0f, 0.0f, 0.0f, 0.0f},
-                                                                  .clearDepth = 1.0f,
-                                                                  .clearStencil = 0});
-#if MLN_RENDER_BACKEND_OPENGL
-    parameters.updateStencilBufferAvailability();
-#endif
-    parameters.currentDrapeTile = drapeTileValues;
-    parameters.currentDrapeTileID = drapeTileID;
-    parameters.invalidateTileClippingMasks();
-
-    auto& globalUniforms = context.mutableGlobalUniformBuffers();
-    gfx::UniformBufferPtr previousGlobalPaintParams;
-    if (drapeGlobalUniformBuffer) {
-        previousGlobalPaintParams = globalUniforms.get(shaders::idGlobalPaintParamsUBO);
-        globalUniforms.set(shaders::idGlobalPaintParamsUBO, drapeGlobalUniformBuffer);
-    }
-    context.bindGlobalUniformBuffers(*parameters.renderPass);
-
-    const gfx::ScissorRect previousScissorRect = parameters.scissorRect;
-    const auto& size = modelOverlayTexture->getTexture()->getSize();
-    parameters.scissorRect = {.x = 0, .y = 0, .width = size.width, .height = size.height};
-
-    renderDrapedLayerGroups(orchestrator, parameters, /*modelOverlayOnly=*/true);
-
-    parameters.currentDrapeTile = {{0, 0, 0, 0}};
-    parameters.currentDrapeTileID.reset();
-    parameters.invalidateTileClippingMasks();
-    context.unbindGlobalUniformBuffers(*parameters.renderPass);
-    if (previousGlobalPaintParams) {
-        globalUniforms.set(shaders::idGlobalPaintParamsUBO, std::move(previousGlobalPaintParams));
-    }
-    parameters.renderPass.reset();
-    parameters.encoder->present(*modelOverlayTexture);
-    parameters.scissorRect = previousScissorRect;
-
-    modelOverlayStale = false;
-    ++modelOverlayVersion;
-    return modelOverlayTexture->getTexture();
 }
 
 } // namespace mln
