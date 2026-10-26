@@ -52,6 +52,7 @@
 #endif
 
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cctype>
 #include <cmath>
@@ -89,6 +90,20 @@ bool debugFlag(const std::string& name) {
 #endif
     return false;
 }
+
+// The switches above, read about once a second rather than every frame.
+struct DebugFlags {
+    bool noTileset = false;
+    bool noDraw = false;
+    bool noDepth = false;
+    bool solid = false;
+    bool noRestore = false;
+
+    static DebugFlags read() {
+        return {debugFlag("NO_TILESET"), debugFlag("NO_DRAW"), debugFlag("NO_DEPTH"), debugFlag("SOLID"),
+                debugFlag("NO_RESTORE")};
+    }
+};
 
 // ---------------------------------------------------------------- cesium-native plumbing
 
@@ -423,6 +438,10 @@ public:
         glGetIntegerv(GL_UNPACK_ALIGNMENT, &unpackAlignment);
         glGetIntegerv(GL_DEPTH_FUNC, &depthFunc);
         glGetBooleanv(GL_DEPTH_WRITEMASK, &depthMask);
+        glGetIntegerv(GL_BLEND_SRC_RGB, &blendSrcRgb);
+        glGetIntegerv(GL_BLEND_DST_RGB, &blendDstRgb);
+        glGetIntegerv(GL_BLEND_SRC_ALPHA, &blendSrcAlpha);
+        glGetIntegerv(GL_BLEND_DST_ALPHA, &blendDstAlpha);
         depthTest = glIsEnabled(GL_DEPTH_TEST);
         blend = glIsEnabled(GL_BLEND);
         cullFace = glIsEnabled(GL_CULL_FACE);
@@ -440,6 +459,10 @@ public:
         glPixelStorei(GL_UNPACK_ALIGNMENT, unpackAlignment);
         glDepthFunc(static_cast<GLenum>(depthFunc));
         glDepthMask(depthMask);
+        glBlendFuncSeparate(static_cast<GLenum>(blendSrcRgb),
+                            static_cast<GLenum>(blendDstRgb),
+                            static_cast<GLenum>(blendSrcAlpha),
+                            static_cast<GLenum>(blendDstAlpha));
         setEnabled(GL_DEPTH_TEST, depthTest);
         setEnabled(GL_BLEND, blend);
         setEnabled(GL_CULL_FACE, cullFace);
@@ -466,6 +489,10 @@ private:
     GLint unit0Texture = 0;
     GLint unpackAlignment = 4;
     GLint depthFunc = GL_LESS;
+    GLint blendSrcRgb = GL_ONE;
+    GLint blendDstRgb = GL_ZERO;
+    GLint blendSrcAlpha = GL_ONE;
+    GLint blendDstAlpha = GL_ZERO;
     GLboolean depthMask = GL_TRUE;
     GLboolean depthTest = GL_FALSE;
     GLboolean blend = GL_FALSE;
@@ -492,10 +519,12 @@ constexpr const char* fragmentSource = MLN_CESIUM_GLSL_PRELUDE
     "uniform sampler2D u_texture;\n"
     "uniform int u_textured;\n"
     "uniform vec4 u_color;\n"
+    "uniform float u_opacity;\n"
     "in vec2 v_uv;\n"
     "out vec4 fragColor;\n"
     "void main() {\n"
-    "    fragColor = u_textured == 1 ? texture(u_texture, v_uv) * u_color : u_color;\n"
+    "    vec4 color = u_textured == 1 ? texture(u_texture, v_uv) * u_color : u_color;\n"
+    "    fragColor = vec4(color.rgb, 1.0) * u_opacity;\n"
     "}\n";
 
 GLuint compileShader(GLenum type, const char* source) {
@@ -522,16 +551,26 @@ GLuint compileShader(GLenum type, const char* source) {
 
 class CesiumTilesHost::Impl {
 public:
-    Impl(std::string url_, double sse, double heightOffset_)
+    Impl(std::string url_, double sse, double heightOffset_, double minimumZoom_, double minimumPitchDegrees)
         : url(std::move(url_)),
           maximumScreenSpaceError(sse),
-          heightOffset(heightOffset_) {}
+          heightOffset(heightOffset_),
+          minimumZoom(minimumZoom_),
+          minimumPitch(glm::radians(minimumPitchDegrees)) {}
 
     std::string url;
     double maximumScreenSpaceError;
     // Metres added to every vertex's height. cesium-native culls and picks detail in the
     // data's own frame, so the camera it sees is moved the other way (viewFor).
     double heightOffset;
+    double minimumZoom;
+    double minimumPitch;
+
+    // Written by the render thread, read from any thread.
+    std::atomic<bool> enabled{true};
+    std::atomic<bool> loading{false};
+    std::atomic<float> progress{0.0f};
+    std::atomic<bool> trimRequested{false};
 
     std::shared_ptr<RendererResources> resources;
     std::unique_ptr<Cesium3DTilesSelection::Tileset> tileset;
@@ -545,6 +584,7 @@ public:
     GLint uTexture = -1;
     GLint uTextured = -1;
     GLint uColor = -1;
+    GLint uOpacity = -1;
 
     std::chrono::steady_clock::time_point lastFrame = std::chrono::steady_clock::now();
     uint64_t frame = 0;
@@ -554,6 +594,39 @@ public:
     // The tileset's lowest point (drawn height), for the flat map.
     double flatBase = 0.0;
     bool flatBaseKnown = false;
+    DebugFlags flags;
+    bool hiddenLastFrame = false;
+
+    // How visible the camera lets the layer be, 0..1: it fades in over the zoom level below
+    // minimumZoom and over the 10 degrees of pitch below minimumPitch.
+    double visibilityFor(const style::CustomLayerRenderParameters& p) const {
+        constexpr double pitchFade = glm::radians(10.0);
+        const double pitch = p.pitch > 3.2 ? glm::radians(p.pitch) : p.pitch;
+        double visibility = 1.0;
+        if (minimumZoom > 0.0) {
+            visibility *= glm::clamp(p.zoom - (minimumZoom - 1.0), 0.0, 1.0);
+        }
+        if (minimumPitch > 0.0) {
+            visibility *= glm::smoothstep(minimumPitch - pitchFade, minimumPitch, pitch);
+        }
+        return visibility;
+    }
+
+    // Evicts every cached tile not in the current selection, starting no new loads. While
+    // hidden the selection is dropped first, so everything evictable goes.
+    void evictCachedTiles(bool hidden) {
+        auto& options = tileset->getOptions();
+        const auto cachedBytes = options.maximumCachedBytes;
+        const auto simultaneousLoads = options.maximumSimultaneousTileLoads;
+        options.maximumCachedBytes = 0;
+        options.maximumSimultaneousTileLoads = 0;
+        if (hidden) tileset->updateViewGroup(tileset->getDefaultViewGroup(), {}, 0.0f);
+        tileset->loadTiles();
+        options.maximumCachedBytes = cachedBytes;
+        options.maximumSimultaneousTileLoads = simultaneousLoads;
+        Log::Info(Event::Render,
+                  "Cesium tiles: trimmed to " + std::to_string(tileset->getTotalDataBytes() / (1024 * 1024)) + " MB");
+    }
 
     void createProgram() {
         const GLuint vs = compileShader(GL_VERTEX_SHADER, vertexSource);
@@ -580,6 +653,7 @@ public:
         uTexture = glGetUniformLocation(program, "u_texture");
         uTextured = glGetUniformLocation(program, "u_textured");
         uColor = glGetUniformLocation(program, "u_color");
+        uOpacity = glGetUniformLocation(program, "u_opacity");
     }
 
     void createTileset() {
@@ -602,7 +676,9 @@ public:
 #endif
         Cesium3DTilesSelection::TilesetOptions options;
         options.maximumScreenSpaceError = maximumScreenSpaceError;
-        options.maximumCachedBytes = 256LL * 1024 * 1024;
+        // Phone-sized: imagery, terrain and feature layers share the device with it.
+        options.maximumCachedBytes = 128LL * 1024 * 1024;
+        options.maximumSimultaneousTileLoads = 12;
         if (debugFlag("NO_CULL")) options.enableFrustumCulling = false; // diagnostics
         tileset = std::make_unique<Cesium3DTilesSelection::Tileset>(externals, url, options);
         Log::Info(Event::Render, "Cesium tiles: loading " + url);
@@ -660,15 +736,32 @@ public:
     }
 
     void render(const style::CustomLayerRenderParameters& p) {
-        if (!program || debugFlag("NO_TILESET")) return;
+        if (frame++ % 60 == 0) flags = DebugFlags::read();
+        if (!program || flags.noTileset) return;
         std::optional<GlStateGuard> stateGuard;
-        if (!debugFlag("NO_RESTORE")) stateGuard.emplace();
-        if (!tileset) createTileset();
+        if (!flags.noRestore) stateGuard.emplace();
 
         const auto now = std::chrono::steady_clock::now();
         const float dt = std::chrono::duration<float>(now - lastFrame).count();
         lastFrame = now;
 
+        const double opacity = enabled ? visibilityFor(p) : 0.0;
+        if (opacity <= 0.0) {
+            // Idle: no selection and no loadTiles, so nothing new is requested. Loads already
+            // in flight still finish into the cache.
+            if (tileset) {
+                asyncSystem->dispatchMainThreadTasks();
+                if (trimRequested.exchange(false)) evictCachedTiles(/*hidden=*/true);
+            }
+            if (!hiddenLastFrame) Log::Info(Event::Render, "Cesium tiles: hidden");
+            hiddenLastFrame = true;
+            loading = false;
+            return;
+        }
+        if (hiddenLastFrame) Log::Info(Event::Render, "Cesium tiles: shown");
+        hiddenLastFrame = false;
+
+        if (!tileset) createTileset();
         asyncSystem->dispatchMainThreadTasks();
         if (!flatBaseKnown) {
             if (const auto* root = tileset->getRootTile()) {
@@ -681,10 +774,15 @@ public:
         const auto view = viewFor(p);
         const auto& result = tileset->updateViewGroup(tileset->getDefaultViewGroup(), {view}, dt);
         tileset->loadTiles();
+        if (trimRequested.exchange(false)) evictCachedTiles(/*hidden=*/false);
         tilesRenderedLastFrame = result.tilesToRenderThisFrame.size();
         tilesQueuedLastFrame = static_cast<size_t>(result.workerThreadTileLoadQueueLength + result.mainThreadTileLoadQueueLength);
+        // cesium-native reports 100% whenever nothing is queued, which is also the case before
+        // the tileset.json has arrived or before the first tile was selected: not loaded yet.
+        progress = tileset->getRootTile() && tilesRenderedLastFrame > 0 ? tileset->computeLoadProgress() : 0.0f;
+        loading = tilesQueuedLastFrame > 0 || progress < 100.0f;
 
-        if (++frame % 120 == 1 || result.tilesToRenderThisFrame.size() != tilesLoggedLastTime) {
+        if (frame % 120 == 1 || result.tilesToRenderThisFrame.size() != tilesLoggedLastTime) {
             tilesLoggedLastTime = result.tilesToRenderThisFrame.size();
             const auto carto = CesiumGeospatial::Ellipsoid::WGS84.cartesianToCartographic(view.getPosition());
             std::string camera = "camera off the ellipsoid";
@@ -716,31 +814,38 @@ public:
             }
         }
 
-        if (debugFlag("NO_DRAW")) return;
+        if (flags.noDraw) return;
 
         const double worldSize = tileSize * std::exp2(p.zoom);
         const auto& proj = p.projectionMatrix; // column-major
 
         glUseProgram(program);
-        if (debugFlag("NO_DEPTH")) { // diagnostics
+        if (flags.noDepth) {
             glDisable(GL_DEPTH_TEST);
         } else {
             glEnable(GL_DEPTH_TEST);
             glDepthFunc(GL_LEQUAL);
             glDepthMask(GL_TRUE);
         }
-        glDisable(GL_BLEND);
+        // Fading in or out it blends over what is under it, premultiplied like the map.
+        if (opacity < 1.0) {
+            glEnable(GL_BLEND);
+            glBlendFuncSeparate(GL_ONE, GL_ONE_MINUS_SRC_ALPHA, GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
+        } else {
+            glDisable(GL_BLEND);
+        }
         glDisable(GL_CULL_FACE);
         glDisable(GL_STENCIL_TEST);
         glActiveTexture(GL_TEXTURE0);
         glUniform1i(uTexture, 0);
+        glUniform1f(uOpacity, static_cast<float>(opacity));
         glUniform1f(uScale, static_cast<float>(worldSize / offsetScale));
         // On terrain, heights are drawn like the terrain's own: metres times its exaggeration.
         // Off terrain the plane is at sea level, so the tileset comes down to its base.
         glUniform1f(uZScale, p.terrainEnabled ? static_cast<float>(p.terrainExaggeration) : 1.0f);
         glUniform1f(uZOffset, p.terrainEnabled ? 0.0f : static_cast<float>(-flatBase));
 
-        const bool solid = debugFlag("SOLID");
+        const bool solid = flags.solid;
         constexpr std::array<float, 4> solidColor{1.0f, 0.0f, 1.0f, 1.0f};
         for (const auto& tile : result.tilesToRenderThisFrame) {
             const auto* content = tile->getContent().getRenderContent();
@@ -773,6 +878,7 @@ public:
     }
 
     void destroy(bool contextAlive) {
+        loading = false;
         if (resources) resources->contextAlive = contextAlive;
         tileset.reset();
         asyncSystem.reset();
@@ -789,8 +895,13 @@ std::mutex liveHostsMutex;
 std::set<const CesiumTilesHost*> liveHosts;
 } // namespace
 
-CesiumTilesHost::CesiumTilesHost(std::string tilesetUrl, double maximumScreenSpaceError, double heightOffsetMeters)
-    : impl(std::make_unique<Impl>(std::move(tilesetUrl), maximumScreenSpaceError, heightOffsetMeters)) {
+CesiumTilesHost::CesiumTilesHost(std::string tilesetUrl,
+                                 double maximumScreenSpaceError,
+                                 double heightOffsetMeters,
+                                 double minimumZoom,
+                                 double minimumPitchDegrees)
+    : impl(std::make_unique<Impl>(
+          std::move(tilesetUrl), maximumScreenSpaceError, heightOffsetMeters, minimumZoom, minimumPitchDegrees)) {
     std::lock_guard<std::mutex> lock(liveHostsMutex);
     liveHosts.insert(this);
 }
@@ -800,15 +911,27 @@ CesiumTilesHost::~CesiumTilesHost() {
     liveHosts.erase(this);
 }
 
-bool CesiumTilesHost::isAlive(const CesiumTilesHost* host) {
+bool CesiumTilesHost::withLiveHost(const CesiumTilesHost* host, const std::function<void(CesiumTilesHost&)>& action) {
     std::lock_guard<std::mutex> lock(liveHostsMutex);
-    return liveHosts.count(host) > 0;
+    if (liveHosts.count(host) == 0) return false;
+    action(*const_cast<CesiumTilesHost*>(host));
+    return true;
 }
 
-bool CesiumTilesHost::isLoading() {
-    if (!impl->tileset) return true;
-    if (!impl->tileset->getRootTile()) return true;
-    return impl->tilesQueuedLastFrame > 0 || impl->tileset->computeLoadProgress() < 100.0f;
+bool CesiumTilesHost::isLoading() const {
+    return impl->loading;
+}
+
+float CesiumTilesHost::loadProgress() const {
+    return impl->progress;
+}
+
+void CesiumTilesHost::setEnabled(bool enabled) {
+    impl->enabled = enabled;
+}
+
+void CesiumTilesHost::trimMemory() {
+    impl->trimRequested = true;
 }
 
 void CesiumTilesHost::initialize(const style::CustomLayerInitParameters&) {
@@ -825,13 +948,6 @@ void CesiumTilesHost::contextLost() {
 
 void CesiumTilesHost::deinitialize() {
     impl->destroy(/*contextAlive=*/true);
-}
-
-float CesiumTilesHost::loadProgress() {
-    // cesium-native reports 100% whenever nothing is queued, which is also the case before
-    // the tileset.json has arrived or before the first tile was selected: not loaded yet.
-    if (!impl->tileset || !impl->tileset->getRootTile() || impl->tilesRenderedLastFrame == 0) return 0.0f;
-    return impl->tileset->computeLoadProgress();
 }
 
 } // namespace cesium

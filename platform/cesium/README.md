@@ -16,6 +16,12 @@ OpenGL ES 3 inside MapLibre's projection, so it sits on the 3D terrain and is oc
 - `CustomLayerRenderParameters` carries `pixelRatio`, `centerAltitude`, `terrainEnabled` and
   `terrainExaggeration`: the host orbits the same point as MapLibre's camera, measures screen
   space error in device pixels, and on a flat map sets the tileset's base on the ground plane.
+- Camera gates: `minimumZoom` and `minimumPitchDegrees` (constructor, Android `CesiumTilesLayer`)
+  fade the layer in over the zoom level and the 10 degrees of pitch below them; below either it is
+  idle, with no tile selection, no requests and no drawing. `setEnabled(false)` makes it idle too,
+  e.g. while its server is offline. The harness reads `MLN_CESIUM_MIN_ZOOM` / `MLN_CESIUM_MIN_PITCH`.
+- Memory: the tile cache is capped at 128 MB and `trimMemory()` evicts everything the view does not
+  show (everything, while hidden) on the next frame, without starting downloads.
 - Tiles load only while frames are drawn. `CesiumTilesHost::isLoading()` (Android:
   `CesiumTilesLayer.isLoading`) tells the app to keep repainting until the view is refined.
 - `MLN_CESIUM_HEIGHT_OFFSET=<metres>`: lifts or lowers a tileset whose vertical datum is off.

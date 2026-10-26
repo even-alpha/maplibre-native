@@ -181,7 +181,13 @@ int main(int argc, char* argv[]) {
         const std::string tilesetUrl = args::get(tilesetValue);
         observer.onStyleLoaded = [&map, &tilesHost, tilesetUrl] {
             if (map.getStyle().getLayer("cesium-tiles")) return;
-            auto host = std::make_unique<mln::cesium::CesiumTilesHost>(tilesetUrl);
+            // MLN_CESIUM_MIN_ZOOM / MLN_CESIUM_MIN_PITCH: the camera gates, as an app sets them.
+            const auto envNumber = [](const char* name) {
+                const char* value = std::getenv(name);
+                return value ? std::atof(value) : 0.0;
+            };
+            auto host = std::make_unique<mln::cesium::CesiumTilesHost>(
+                tilesetUrl, 16.0, 0.0, envNumber("MLN_CESIUM_MIN_ZOOM"), envNumber("MLN_CESIUM_MIN_PITCH"));
             tilesHost = host.get();
             map.getStyle().addLayer(std::make_unique<mln::style::CustomLayer>("cesium-tiles", std::move(host)));
         };
@@ -197,15 +203,15 @@ int main(int argc, char* argv[]) {
         auto rendered = frontend.render(map);
 #if MLN_WITH_CESIUM_TILES
         if (tilesetValue) {
-            // The tiles stream in over many frames: keep rendering until the layer reports the
-            // view's tiles loaded (and a couple of frames past it, so the last uploads draw), or
-            // give up after a while and write what there is.
+            // The tiles stream in over many frames: keep rendering until the layer stops loading
+            // (and a couple of frames past it, so the last uploads draw), or give up after a while
+            // and write what there is. A layer hidden by its camera gates is not loading.
             int settled = 0;
             for (int i = 0; i < 400 && (settled < 3 || i < 10); ++i) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(100));
                 rendered = frontend.render(map);
                 const float progress = tilesHost ? tilesHost->loadProgress() : 0.0f;
-                settled = progress >= 100.0f ? settled + 1 : 0;
+                settled = tilesHost && !tilesHost->isLoading() ? settled + 1 : 0;
                 if (i % 20 == 0) std::cerr << "tiles: " << progress << "% loaded" << std::endl;
             }
         }

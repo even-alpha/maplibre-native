@@ -273,6 +273,8 @@ if(MLN_WITH_CESIUM_TILES)
     # The Cesium layer's JNI factory is a plain exported symbol, not registered in JNI_OnLoad.
     string(APPEND MLN_PLUGIN_EXPORTS "\n    Java_org_maplibre_android_cesium_CesiumTilesLayer_nativeCreateHost;")
     string(APPEND MLN_PLUGIN_EXPORTS "\n    Java_org_maplibre_android_cesium_CesiumTilesLayer_nativeIsLoading;")
+    string(APPEND MLN_PLUGIN_EXPORTS "\n    Java_org_maplibre_android_cesium_CesiumTilesLayer_nativeSetEnabled;")
+    string(APPEND MLN_PLUGIN_EXPORTS "\n    Java_org_maplibre_android_cesium_CesiumTilesLayer_nativeTrimMemory;")
 endif()
 set(_version_script "${CMAKE_CURRENT_BINARY_DIR}/maplibre-version-script")
 configure_file("${CMAKE_CURRENT_SOURCE_DIR}/../../../version-script.in" "${_version_script}" @ONLY)
