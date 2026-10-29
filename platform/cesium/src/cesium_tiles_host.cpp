@@ -185,9 +185,11 @@ std::unique_ptr<LoadThreadResult> buildTile(const CesiumGltf::Model& model,
                                             const glm::dmat4& tileTransform,
                                             double heightOffset) {
     auto out = std::make_unique<LoadThreadResult>();
-    // The tile transform takes glTF content to ECEF; glTF is y-up and 3D Tiles are z-up,
-    // and the loader records which applies in the model's extras.
-    const glm::dmat4 root = CesiumGltfContent::GltfUtilities::applyGltfUpAxisTransform(model, tileTransform);
+    // The tile transform takes glTF content to ECEF. A b3dm's RTC_CENTER (kept as the model's
+    // CESIUM_RTC extension) offsets it first, as Skyline's exports do for every tile; glTF is
+    // y-up and 3D Tiles are z-up, and the loader records which applies in the model's extras.
+    const glm::dmat4 root = CesiumGltfContent::GltfUtilities::applyGltfUpAxisTransform(
+        model, CesiumGltfContent::GltfUtilities::applyRtcCenter(model, tileTransform));
     const auto& ellipsoid = CesiumGeospatial::Ellipsoid::WGS84;
 
     struct Pending {
