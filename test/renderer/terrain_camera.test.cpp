@@ -180,6 +180,83 @@ TEST(TerrainCamera, CentreRidesTheTerrainSurface) {
     EXPECT_NEAR(settled, plateauMeters, 5.0);
 }
 
+// A camera placed by its altitude above sea level over high ground starts inside the ground. The
+// tile cover then found every tile above the camera and asked for none, the DEM that would lift the
+// camera onto the ground included, so the clamp never learned of the ground and the camera stayed
+// under it. The cover falls back to the flat footprint, the DEM stays, and the clamp lifts the camera.
+TEST(TerrainCamera, ACameraStartingInsideTheGroundIsLiftedOntoIt) {
+    TerrainCameraTest test;
+    test.map.setCenterClampedToGround(true);
+    // Opened at sea-level altitude over the 1,000 m plateau, close in: the eye is a few hundred
+    // meters up, under the ground.
+    test.map.jumpTo(CameraOptions().withZoom(15.0).withPitch(60.0));
+    const auto eyeMeters = [&] {
+        const double mercatorToMeters = util::M2PI * util::EARTH_RADIUS_M * std::cos(util::deg2rad(47.2692));
+        return test.eye()[2] * mercatorToMeters;
+    };
+    ASSERT_LT(eyeMeters(), plateauMeters) << "the camera starts inside the ground";
+
+    test.renderAndGetAltitude(20);
+    EXPECT_NEAR(*test.map.getCameraOptions({}).centerAltitude, plateauMeters, 5.0);
+    EXPECT_GT(eyeMeters(), plateauMeters) << "the camera is above the ground";
+}
+
+// A DEM tile of one flat height. Terrain-RGB: -10000 + (R * 65536 + G * 256 + B) * 0.1, so sea level
+// is RGB(1, 134, 160) and the 1,000 m plateau RGB(1, 173, 176).
+std::string makeFlatDEMTile(uint8_t r, uint8_t g, uint8_t b) {
+    PremultipliedImage image({demTileSize, demTileSize});
+    for (uint32_t i = 0; i < demTileSize * demTileSize; ++i) {
+        uint8_t* px = image.data.get() + i * 4;
+        px[0] = r;
+        px[1] = g;
+        px[2] = b;
+        px[3] = 255;
+    }
+    return encodePNG(image);
+}
+
+// alpha-mobile#534: one far camera jump (zoom 9 to 17/18 in the app) turned the whole map black until
+// the camera came back to a coarser zoom. The view before the jump had a lot of DEM loaded and its
+// centre on low ground, so the clamp had the centre altitude at that low ground. The jump landed on
+// ground that was already loaded (it sits in the same coarse DEM tiles) but was higher than the eye,
+// so the elevated tile cover came back empty: no tile requests, nothing drawn, and the camera never
+// learned of the ground it was under. Here the world is two z2 DEM tiles, sea level in the west and a
+// 1,000 m plateau in the east; the view at zoom 2 is centred on the sea and shows both, and the jump
+// lands on the plateau at zoom 17.
+TEST(TerrainCamera, AFarJumpOntoLoadedHighGroundIsLiftedOntoIt) {
+    TerrainCameraTest test;
+    const std::string sea = makeFlatDEMTile(1, 134, 160);
+    const std::string plateau = makeFlatDEMTile(1, 173, 176);
+    // The plateau is the tile column that holds Innsbruck (z2 x=2, from 0 to 90 degrees east).
+    test.fileSource->tileResponse = [&](const Resource& resource) {
+        Response res;
+        const bool east = resource.url.find("-2-") != std::string::npos;
+        res.data = std::make_shared<std::string>(east ? plateau : sea);
+        return res;
+    };
+    test.map.setCenterClampedToGround(true);
+    // Unlike renderAndGetAltitude, a frame never waits for the loop to have work: with the bug there
+    // is none, the map asks for nothing, and runOnce would block for good.
+    const auto render = [&](int frames) {
+        for (int i = 0; i < frames; ++i) {
+            test.loop.invoke([] {});
+            test.loop.runOnce();
+            test.frontend.render(test.map);
+        }
+    };
+
+    // Zoom 2 from over the sea, wide enough to take in the plateau tile as well.
+    test.map.jumpTo(CameraOptions().withCenter(LatLng{47.2692, -5.0}).withZoom(2.0).withPitch(0.0));
+    render(6);
+    ASSERT_NEAR(*test.map.getCameraOptions({}).centerAltitude, 0.0, 5.0) << "the centre rides the sea";
+
+    // The far jump, close in over the plateau.
+    test.map.jumpTo(CameraOptions().withCenter(LatLng{47.2692, 11.4041}).withZoom(17.0).withPitch(0.0));
+    render(14);
+    EXPECT_NEAR(*test.map.getCameraOptions({}).centerAltitude, plateauMeters, 5.0)
+        << "the camera is lifted onto the ground it jumped to";
+}
+
 // The historical worry about a terrain-anchored centre was that raising it re-samples a new
 // elevation and runs away. Raising the centre moves the orbit plane, not the centre's lng/lat,
 // so it must settle - and the centre must not drift while it does.
